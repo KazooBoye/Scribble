@@ -1,0 +1,352 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    Scribble Game - Architecture Diagram                    ║
+║                  Multiplayer Drawing & Guessing Game System                ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          Web UI Clients                                  │
+│              (HTML/JS/CSS served by C game server)                       │
+│                                                                          │
+│  Browser Features:                                                       │
+│  • Landing page (Play Now / Create Room / Join Room)                    │
+│  • Game canvas with drawing tools                                       │
+│  • Chat & guess input                                                   │
+│  • Scoreboard & timer display                                           │
+│  • Reconnection dialog                                                  │
+│  • Game end screen with final scores                                    │
+└─────────────────────▲────────────────▲───────────────────────────────────┘
+                      │                │
+                      │                │ WebSocket (JSON messages)
+                      │                │ Port: 8081
+        (multiple browsers: PC / laptop / mobile)
+
+
+         ┌────────────┴────────────────┴──────────────────┐
+         │          C Client Proxy (Multi-threaded)       │
+         ├────────────────────────────────────────────────┤
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Thread 1: WebSocket Listener             │ │
+         │  │ • Accepts browser connections            │ │
+         │  │ • Parses JSON messages from browsers     │ │
+         │  │ • Forwards to dispatcher queue           │ │
+         │  │ • Sends responses back to browsers       │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Thread 2: TCP Handler                    │ │
+         │  │ • Persistent connection to game server   │ │
+         │  │ • Handles matchmaking requests           │ │
+         │  │ • Processes chat & game messages         │ │
+         │  │ • Non-blocking I/O with select()         │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Thread 3: UDP Handler                    │ │
+         │  │ • Sends drawing strokes to server        │ │
+         │  │ • Receives broadcast stroke data         │ │
+         │  │ • Ultra-low latency (<10ms)              │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Thread 4: Dispatcher (Message Router)    │ │
+         │  │ • Thread-safe message queues (mutex)     │ │
+         │  │ • Routes WS ↔ TCP ↔ UDP messages         │ │
+         │  │ • Maintains state cache                  │ │
+         │  │ • Handles reconnection data              │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  Shared Memory (mutex-protected):             │
+         │  • Message queues (from_ws, to_ws, etc.)      │
+         │  • State cache (room_id, player_id, etc.)     │
+         │  • Condition variables for signaling          │
+         └────────────────────┬───────────────────────────┘
+                              │
+                              │ TCP (port 9090) + UDP (port 9091)
+                              │
+         ┌────────────────────▼───────────────────────────┐
+         │              C Game Server                     │
+         ├────────────────────────────────────────────────┤
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ HTTP Server (port 8080)                  │ │
+         │  │ • Serves static HTML/CSS/JS files        │ │
+         │  │ • MIME type detection                    │ │
+         │  │ • Path sanitization (security)           │ │
+         │  │ • Concurrent request handling            │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ TCP Server (port 9090)                   │ │
+         │  │ • Player registration & authentication   │ │
+         │  │ • Matchmaking by latency (RTT-based)     │ │
+         │  │ • Room management (public & private)     │ │
+         │  │ • Chat message processing                │ │
+         │  │ • Game state synchronization             │ │
+         │  │ • Reconnection handling                  │ │
+         │  │ • Non-blocking I/O with select()         │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ UDP Server (port 9091)                   │ │
+         │  │ • Receives drawing strokes               │ │
+         │  │ • Broadcasts to all room players         │ │
+         │  │ • Minimal overhead for speed             │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Game Logic Engine                        │ │
+         │  │ • Turn rotation (5 players)              │ │
+         │  │ • Word selection from wordlist           │ │
+         │  │ • Scoring algorithm (time-based)         │ │
+         │  │ • Round management (90 seconds)          │ │
+         │  │ • Win condition detection                │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Matchmaking System                       │ │
+         │  │ • Latency measurement (ping/pong)        │ │
+         │  │ • Group players by RTT (~50ms tolerance) │ │
+         │  │ • Private room code generation           │ │
+         │  │ • Room cleanup when empty                │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Logging Engine                           │ │
+         │  │ • JSON lines format (.jl)                │ │
+         │  │ • Logs: room events, strokes, guesses    │ │
+         │  │ • Timestamps, player actions, scores     │ │
+         │  │ • Thread-safe with mutex                 │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Reconnection Engine                      │ │
+         │  │ • Session token generation               │ │
+         │  │ • 5-minute grace period                  │ │
+         │  │ • State restoration:                     │ │
+         │  │   - Player score & position              │ │
+         │  │   - Room state & current round           │ │
+         │  │   - Drawing buffer (last 100 strokes)    │ │
+         │  │   - Chat history (last 10 messages)      │ │
+         │  └──────────────────────────────────────────┘ │
+         │                                                │
+         │  ┌──────────────────────────────────────────┐ │
+         │  │ Timer Thread                             │ │
+         │  │ • 1-second tick interval                 │ │
+         │  │ • Updates all active room timers         │ │
+         │  │ • Triggers round end when time expires   │ │
+         │  │ • Cleanup expired reconnection states    │ │
+         │  └──────────────────────────────────────────┘ │
+         └────────────────────────────────────────────────┘
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                          Data Flow Diagram                                 ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Player Registration Flow:
+─────────────────────────
+Browser → WS → Proxy(Dispatcher) → TCP → Server
+                                         ↓
+                                    Register Player
+                                    Generate Session Token
+                                         ↓
+Browser ← WS ← Proxy(Dispatcher) ← TCP ← Server
+        (player_id, session_token)
+
+Matchmaking Flow:
+─────────────────
+Browser → "Play Now" → Proxy → Server
+                                  ↓
+                             Measure RTT
+                             Find/Create Room
+                             (latency-based grouping)
+                                  ↓
+Browser ← Room Joined ← Proxy ← Server
+        (room_id, players[])
+
+Drawing Stroke Flow (Ultra Low Latency):
+────────────────────────────────────────
+Browser (Canvas) → WS → Proxy(UDP Thread) → UDP Server
+                                              ↓
+                                         Add to room buffer
+                                         Log stroke
+                                              ↓
+Browser ← WS ← Proxy(UDP Thread) ← UDP Broadcast ← Server
+(all players in room receive stroke in <10ms)
+
+Chat/Guess Flow:
+───────────────
+Browser → Message → Proxy(TCP) → Server
+                                    ↓
+                               Check if guess
+                               Award points if correct
+                                    ↓
+Browser ← Broadcast ← Proxy ← Server
+(all players see chat or "X guessed correctly!")
+
+Reconnection Flow:
+─────────────────
+Browser disconnects → Server saves state (5 min timeout)
+                                ↓
+Browser reconnects → Send session_token → Server
+                                             ↓
+                                        Verify token
+                                        Restore state
+                                             ↓
+Browser ← Full state restore ← Proxy ← Server
+(room, players, score, drawings, chat)
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                       Protocol Specifications                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+TCP Message Format:
+──────────────────
+[4 bytes: length (network byte order)][JSON payload]
+
+Example:
+[0x00 0x00 0x00 0x2A][{"type":3,"data":{"player_id":1,"username":"Alice"}}]
+
+UDP Message Format:
+──────────────────
+Binary struct (fixed size for speed):
+{
+    uint8_t  type;           // UDP_STROKE = 100
+    uint32_t room_id;        // Room identifier
+    uint32_t stroke_id;      // Stroke sequence number
+    float    x1, y1, x2, y2; // Line coordinates
+    uint32_t color;          // RGB color (hex)
+    uint8_t  thickness;      // Brush thickness
+    uint64_t timestamp;      // Milliseconds since epoch
+}
+
+WebSocket Message Format:
+─────────────────────────
+JSON over WebSocket frames:
+{
+    "type": <message_type>,
+    "data": {
+        // Type-specific data
+    }
+}
+
+Message Types:
+─────────────
+TCP:
+0-27: System messages (PING, REGISTER, JOIN_ROOM, CHAT, etc.)
+
+UDP:
+100: STROKE
+101: CLEAR_CANVAS
+102: UNDO
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                      Threading & Concurrency                               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Server Threading:
+────────────────
+• Main thread: Initialization & signal handling
+• HTTP thread: Serves web files (thread per request)
+• TCP thread: Game logic (select() for multiple clients)
+• UDP thread: Drawing broadcast
+• Timer thread: 1-second tick for all rooms
+
+Client Proxy Threading:
+──────────────────────
+• Thread 1 (WS): Handles N browser connections
+• Thread 2 (TCP): Single connection to game server
+• Thread 3 (UDP): Bi-directional stroke communication
+• Thread 4 (Dispatcher): Routes messages between threads
+
+Synchronization Primitives:
+──────────────────────────
+• pthread_mutex_t: Protects shared data structures
+• pthread_cond_t: Thread signaling for queues
+• Lock-free queues: Optional optimization (not used)
+
+Message Queue Design:
+────────────────────
+typedef struct {
+    Message items[1000];
+    int head, tail, count;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} MessageQueue;
+
+Each proxy has 6 queues:
+• from_ws_queue  (Browser → Server)
+• to_ws_queue    (Server → Browser)
+• from_tcp_queue (Server TCP → Browser)
+• to_tcp_queue   (Browser → Server TCP)
+• from_udp_queue (Server UDP → Browser)
+• to_udp_queue   (Browser → Server UDP)
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         Security Considerations                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+1. Path Traversal Protection:
+   • HTTP router sanitizes all file paths
+   • Blocks ".." in URLs
+   • Only serves files from webui/
+
+2. Input Validation:
+   • Username max length: 32 chars
+   • Chat message max: 256 chars
+   • Room code format: exactly 6 alphanumeric
+
+3. Resource Limits:
+   • Max 100 concurrent players
+   • Max 100 active rooms
+   • Max 10,000 strokes per room
+
+4. Session Security:
+   • Unique session tokens per player
+   • Token format: player_id-timestamp-random
+   • 5-minute expiration for reconnect
+
+5. DoS Protection:
+   • Connection limits per IP
+   • Message rate limiting (future work)
+   • Automatic cleanup of stale connections
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                          Performance Metrics                               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Target Performance:
+──────────────────
+• Drawing latency: <20ms (UDP)
+• Chat latency: <100ms (TCP)
+• HTTP response: <50ms (static files)
+• Matchmaking time: <2s (auto)
+• Reconnection time: <500ms
+• Concurrent users: 500+ (100 rooms × 5 players)
+
+Memory Usage:
+────────────
+• Server: ~50MB base + ~1MB per active room
+• Proxy: ~10MB base + ~100KB per browser connection
+• Browser: ~20MB (canvas + JS runtime)
+
+Network Bandwidth:
+─────────────────
+• Drawing: ~100 KB/s per active drawer
+• Chat: ~5 KB/s per room
+• Game state: ~10 KB/s per room
+
+CPU Usage:
+─────────
+• Server: ~5% idle, ~30% with 20 active rooms
+• Proxy: ~2% idle, ~10% with 10 browser connections
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                            End of Documentation                            ║
+╚════════════════════════════════════════════════════════════════════════════╝

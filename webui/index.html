@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scribble - Drawing & Guessing Game</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Landing Page -->
+    <div id="landing-page" class="screen">
+        <div class="container">
+            <h1 class="logo">🎨 Scribble</h1>
+            <p class="tagline">Draw, Guess, and Have Fun!</p>
+            <p id="connection-status" class="connection-status">Connecting...</p>
+            
+            <div class="menu">
+                <button id="btn-play-now" class="btn btn-primary">
+                    Play Now (Auto Matchmaking)
+                </button>
+                
+                <button id="btn-create-room" class="btn btn-secondary">
+                    Create Private Room
+                </button>
+                
+                <div class="input-group">
+                    <input type="text" id="input-room-code" placeholder="Enter Room Code" maxlength="6">
+                    <button id="btn-join-room" class="btn btn-secondary">
+                        Join Room
+                    </button>
+                </div>
+                
+                <div class="input-group">
+                    <input type="text" id="input-username" placeholder="Your Name" maxlength="20" value="Player">
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Game Page -->
+    <div id="game-page" class="screen hidden">
+        <div class="game-layout">
+            <!-- Left Sidebar - Players -->
+            <div class="sidebar left">
+                <div class="section">
+                    <h3>Players</h3>
+                    <div id="players-list" class="players-list"></div>
+                </div>
+                
+                <div class="section">
+                    <h3>Room Info</h3>
+                    <div id="room-info">
+                        <p>Room Code: <span id="room-code">-</span></p>
+                        <p>Round: <span id="round-number">0</span>/5</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Center - Canvas -->
+            <div class="main-area">
+                <div class="game-header">
+                    <div class="word-display">
+                        <span id="word-mask">Waiting for players...</span>
+                    </div>
+                    <div class="timer">
+                        <span id="timer">90</span>s
+                    </div>
+                </div>
+                
+                <!-- Drawing Tools -->
+                <div id="drawing-tools" class="tools hidden">
+                    <div class="tool-group">
+                        <label>Brush Size:</label>
+                        <input type="range" id="brush-size" min="2" max="20" value="5">
+                        <span id="brush-size-value">5</span>
+                    </div>
+                    <div class="tool-group">
+                        <label>Color:</label>
+                        <input type="color" id="color-picker" value="#000000">
+                    </div>
+                    <button id="btn-clear" class="btn btn-small">Clear Canvas</button>
+                </div>
+                
+                <canvas id="drawing-canvas" width="800" height="600"></canvas>
+                
+                <div id="status-message" class="status-message"></div>
+            </div>
+            
+            <!-- Right Sidebar - Chat -->
+            <div class="sidebar right">
+                <div class="section full-height">
+                    <h3>Chat & Guesses</h3>
+                    <div id="chat-box" class="chat-box"></div>
+                    <div class="chat-input">
+                        <input type="text" id="chat-input" placeholder="Type your guess..." maxlength="100">
+                        <button id="btn-send-chat" class="btn btn-primary">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Reconnect Dialog -->
+    <div id="reconnect-dialog" class="dialog hidden">
+        <div class="dialog-content">
+            <h2>⚠️ Connection Lost</h2>
+            <p>Trying to reconnect...</p>
+            <button id="btn-reconnect" class="btn btn-primary">Reconnect Now</button>
+            <button id="btn-leave" class="btn btn-secondary">Leave Game</button>
+        </div>
+    </div>
+    
+    <!-- Game End Dialog -->
+    <div id="game-end-dialog" class="dialog hidden">
+        <div class="dialog-content">
+            <h2>🎉 Game Over!</h2>
+            <div id="final-scores"></div>
+            <button id="btn-play-again" class="btn btn-primary">Play Again</button>
+        </div>
+    </div>
+    
+    <script src="websocket.js"></script>
+    <script src="drawing.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

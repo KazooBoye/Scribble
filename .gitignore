@@ -1,0 +1,38 @@
+# Build directory
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Executables
+scribble_server
+scribble_proxy
+
+# Logs
+*.log
+server.log
+proxy.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled files
+*.out
+*.exe
+
+# Temporary files
+*.tmp
+*.temp
+
+# Core dumps
+core
+core.*
+
+# Debug files
+*.dSYM/
