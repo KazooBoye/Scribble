@@ -2,8 +2,18 @@
 # Multiplayer Drawing & Guessing Game
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -pthread -std=c11
+CFLAGS = -Wall -Wextra -O2 -pthread -std=c11 -D_GNU_SOURCE
 LDFLAGS = -pthread -lm
+
+# Detect OS for platform-specific libraries
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS - use CommonCrypto (no extra flags needed)
+    CLIENT_LDFLAGS = $(LDFLAGS)
+else
+    # Linux/WSL - use OpenSSL
+    CLIENT_LDFLAGS = $(LDFLAGS) -lssl -lcrypto
+endif
 
 # Directories
 SERVER_DIR = server
@@ -85,7 +95,7 @@ client: $(CLIENT_BIN)
 
 $(CLIENT_BIN): $(CLIENT_OBJS)
 	@echo "[LINK] Linking client proxy executable..."
-	@$(CC) $(CLIENT_OBJS) -o $@ $(LDFLAGS)
+	@$(CC) $(CLIENT_OBJS) -o $@ $(CLIENT_LDFLAGS)
 	@echo "[BUILD] Client proxy built: $@"
 
 # Compile server object files

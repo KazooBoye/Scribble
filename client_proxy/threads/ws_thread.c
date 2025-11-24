@@ -8,8 +8,17 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <errno.h>
-#include <CommonCrypto/CommonDigest.h>
-#include <CoreFoundation/CoreFoundation.h>
+
+// Cross-platform SHA1 support
+#ifdef __APPLE__
+    #include <CommonCrypto/CommonDigest.h>
+    #define SHA1_DIGEST_LENGTH CC_SHA1_DIGEST_LENGTH
+    #define sha1_compute(data, len, result) CC_SHA1((unsigned char*)(data), (CC_LONG)(len), (result))
+#else
+    #include <openssl/sha.h>
+    #define SHA1_DIGEST_LENGTH SHA_DIGEST_LENGTH
+    #define sha1_compute(data, len, result) SHA1((unsigned char*)(data), (len), (result))
+#endif
 
 #define MAX_WS_CLIENTS 50
 
@@ -133,12 +142,12 @@ int ws_handshake(int client_fd) {
     snprintf(concat, sizeof(concat), "%s%s", key, magic);
     
     // SHA-1 hash
-    unsigned char sha1_result[CC_SHA1_DIGEST_LENGTH];
-    CC_SHA1((unsigned char*)concat, (CC_LONG)strlen(concat), sha1_result);
+    unsigned char sha1_result[SHA1_DIGEST_LENGTH];
+    sha1_compute(concat, strlen(concat), sha1_result);
     
     // Base64 encode
     char accept_key[64];
-    base64_encode(sha1_result, CC_SHA1_DIGEST_LENGTH, accept_key);
+    base64_encode(sha1_result, SHA1_DIGEST_LENGTH, accept_key);
     
     // Build response
     char response[512];
