@@ -2,16 +2,9 @@
 #include "../game/matchmaking.h"
 #include "../game/game_logic.h"
 #include "../utils/logger.h"
+#include "../utils/endian_compat.h"
 #include <string.h>
 #include <arpa/inet.h>
-
-#ifdef __APPLE__
-#include <libkern/OSByteOrder.h>
-#define htobe64(x) OSSwapHostToBigInt64(x)
-#define be64toh(x) OSSwapBigToHostInt64(x)
-#else
-#include <endian.h>
-#endif
 
 int serialize_udp_stroke(const Stroke* stroke, uint32_t room_id, char* buffer, int buffer_size) {
     if (buffer_size < sizeof(UDPMessage)) return -1;
