@@ -45,6 +45,7 @@ typedef enum {
     MSG_GUESS_CORRECT,
     MSG_GUESS_WRONG,
     MSG_TIMER_UPDATE,
+    MSG_COUNTDOWN_UPDATE,
     MSG_ROUND_END,
     MSG_GAME_END,
     MSG_PLAYER_JOIN,
@@ -103,6 +104,7 @@ typedef struct {
     uint64_t last_seen;
     bool is_drawing;
     bool has_guessed;
+    bool has_drawn;  // Track if player has had their turn to draw
     // TCP receive buffer for handling partial messages
     char recv_buffer[BUFFER_SIZE];
     int recv_buffer_len;
@@ -118,12 +120,15 @@ typedef struct {
     int current_drawer_idx;
     char current_word[MAX_WORD_LEN];
     int round_number;
+    int total_rounds;  // Total rounds for this game (equals player count at start)
     uint64_t round_start_time;
     int time_remaining;
     Stroke strokes[MAX_STROKES];
     int stroke_count;
     bool is_private;
     uint64_t created_at;
+    uint64_t game_start_countdown;  // Timestamp when countdown started (0 = not started)
+    bool countdown_active;           // Whether countdown is active
 } Room;
 
 // TCP Message Header (4 bytes length + JSON payload)

@@ -51,7 +51,7 @@
                     <h3>Room Info</h3>
                     <div id="room-info">
                         <p>Room Code: <span id="room-code">-</span></p>
-                        <p>Round: <span id="round-number">0</span>/5</p>
+                        <p>Round: <span id="round-number">0</span>/<span id="total-rounds">0</span></p>
                     </div>
                 </div>
             </div>
@@ -61,6 +61,9 @@
                 <div class="game-header">
                     <div class="word-display">
                         <span id="word-mask">Waiting for players...</span>
+                    </div>
+                    <div id="countdown-display" class="countdown hidden">
+                        <span>Game starting in <strong id="countdown-timer">15</strong>s</span>
                     </div>
                     <div class="timer">
                         <span id="timer">90</span>s
@@ -76,7 +79,18 @@
                     </div>
                     <div class="tool-group">
                         <label>Color:</label>
-                        <input type="color" id="color-picker" value="#000000">
+                        <div id="color-palette" class="color-palette">
+                            <button class="color-btn active" data-color="0" style="background-color: #000000" title="Black"></button>
+                            <button class="color-btn" data-color="1" style="background-color: #FF0000" title="Red"></button>
+                            <button class="color-btn" data-color="2" style="background-color: #00FF00" title="Green"></button>
+                            <button class="color-btn" data-color="3" style="background-color: #0000FF" title="Blue"></button>
+                            <button class="color-btn" data-color="4" style="background-color: #FFFF00" title="Yellow"></button>
+                            <button class="color-btn" data-color="5" style="background-color: #FF00FF" title="Magenta"></button>
+                            <button class="color-btn" data-color="6" style="background-color: #00FFFF" title="Cyan"></button>
+                            <button class="color-btn" data-color="7" style="background-color: #FFA500" title="Orange"></button>
+                            <button class="color-btn" data-color="8" style="background-color: #800080" title="Purple"></button>
+                            <button class="color-btn" data-color="9" style="background-color: #8B4513" title="Brown"></button>
+                        </div>
                     </div>
                     <button id="btn-clear" class="btn btn-small">Clear Canvas</button>
                 </div>
@@ -93,7 +107,7 @@
                     <div id="chat-box" class="chat-box"></div>
                     <div class="chat-input">
                         <input type="text" id="chat-input" placeholder="Type your guess..." maxlength="100">
-                        <button id="btn-send-chat" class="btn btn-primary">Send</button>
+                        <button id="btn-send-chat" class="btn btn-primary btn-icon" title="Send">➤</button>
                     </div>
                 </div>
             </div>
@@ -112,10 +126,11 @@
     
     <!-- Game End Dialog -->
     <div id="game-end-dialog" class="dialog hidden">
-        <div class="dialog-content">
-            <h2>🎉 Game Over!</h2>
-            <div id="final-scores"></div>
-            <button id="btn-play-again" class="btn btn-primary">Play Again</button>
+        <div class="dialog-content game-end-content">
+            <h2>🎮 Game Ended</h2>
+            <h3>Player Rankings</h3>
+            <div id="final-scores" class="rankings"></div>
+            <button id="btn-return-home" class="btn btn-primary">Return to Home</button>
         </div>
     </div>
     

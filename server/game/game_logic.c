@@ -60,6 +60,7 @@ void init_room(Room* room, uint32_t room_id, bool is_private) {
     room->created_at = get_current_time_ms();
     room->state = ROOM_WAITING;
     room->current_drawer_idx = -1;
+    room->total_rounds = 0;  // Will be set when game starts
     
     if (is_private) {
         // Generate random 6-character room code
@@ -88,20 +89,68 @@ int add_player_to_room(Room* room, Player* player) {
 }
 
 int remove_player_from_room(Room* room, Player* player) {
+    int player_idx = -1;
+    
+    // Find player index
     for (int i = 0; i < room->player_count; i++) {
         if (room->players[i] == player) {
-            // Shift remaining players
-            for (int j = i; j < room->player_count - 1; j++) {
-                room->players[j] = room->players[j + 1];
-            }
-            room->players[room->player_count - 1] = NULL;
-            room->player_count--;
-            
-            log_room_event(room->room_id, "player_left", player->username);
-            return 0;
+            player_idx = i;
+            break;
         }
     }
-    return -1;
+    
+    if (player_idx == -1) return -1;
+    
+    bool was_drawing = player->is_drawing;
+    bool was_in_game = (room->state == ROOM_PLAYING);
+    
+    // Shift remaining players
+    for (int j = player_idx; j < room->player_count - 1; j++) {
+        room->players[j] = room->players[j + 1];
+    }
+    room->players[room->player_count - 1] = NULL;
+    room->player_count--;
+    
+    printf("[GAME] Player %s left. Remaining: %d players\n", player->username, room->player_count);
+    
+    // If game is in progress, adjust rounds and drawer index
+    if (was_in_game && room->player_count >= 2) {
+        // Recalculate total rounds based on remaining players who haven't drawn
+        int remaining_rounds = 0;
+        for (int i = 0; i < room->player_count; i++) {
+            if (room->players[i] && !room->players[i]->has_drawn) {
+                remaining_rounds++;
+            }
+        }
+        
+        room->total_rounds = room->round_number + remaining_rounds;
+        printf("[GAME] Adjusted total rounds to %d (current: %d, remaining: %d)\n",
+               room->total_rounds, room->round_number, remaining_rounds);
+        
+        // If current drawer left, adjust drawer index
+        if (was_drawing) {
+            // Move drawer index back one since we shifted array
+            if (room->current_drawer_idx > 0) {
+                room->current_drawer_idx--;
+            } else {
+                room->current_drawer_idx = room->player_count - 1;
+            }
+            printf("[GAME] Current drawer left, ending round early\n");
+            end_round(room);
+        } else {
+            // Adjust drawer index if it was after the removed player
+            if (room->current_drawer_idx > player_idx) {
+                room->current_drawer_idx--;
+            }
+        }
+    } else if (room->player_count < 2 && was_in_game) {
+        // Not enough players to continue
+        printf("[GAME] Not enough players remaining, ending game\n");
+        end_game(room);
+    }
+    
+    log_room_event(room->room_id, "player_left", player->username);
+    return 0;
 }
 
 void start_game(Room* room) {
@@ -109,15 +158,19 @@ void start_game(Room* room) {
     
     room->state = ROOM_PLAYING;
     room->round_number = 0;
+    room->total_rounds = room->player_count;  // Set total rounds based on current player count
     
     // Reset all player scores
     for (int i = 0; i < room->player_count; i++) {
         if (room->players[i]) {
             room->players[i]->score = 0;
             room->players[i]->state = PLAYER_PLAYING;
+            room->players[i]->has_drawn = false;  // Track if player has had their turn
         }
     }
     
+    printf("[GAME] Starting game with %d players, %d total rounds\n", 
+           room->player_count, room->total_rounds);
     log_room_event(room->room_id, "game_started", "");
     start_next_round(room);
 }
@@ -125,13 +178,41 @@ void start_game(Room* room) {
 void start_next_round(Room* room) {
     room->round_number++;
     
-    if (room->round_number > room->player_count) {
+    // Check if all remaining players have had their turn or if we've exceeded total rounds
+    int players_who_havent_drawn = 0;
+    for (int i = 0; i < room->player_count; i++) {
+        if (room->players[i] && !room->players[i]->has_drawn) {
+            players_who_havent_drawn++;
+        }
+    }
+    
+    if (players_who_havent_drawn == 0 || room->round_number > room->total_rounds) {
+        printf("[GAME] All players have drawn or rounds completed. Ending game.\n");
         end_game(room);
         return;
     }
     
-    // Next drawer
-    room->current_drawer_idx = (room->current_drawer_idx + 1) % room->player_count;
+    // Find next drawer who hasn't drawn yet
+    int attempts = 0;
+    do {
+        room->current_drawer_idx = (room->current_drawer_idx + 1) % room->player_count;
+        attempts++;
+        
+        // Prevent infinite loop
+        if (attempts > room->player_count) {
+            printf("[GAME] ERROR: Could not find next drawer\n");
+            end_game(room);
+            return;
+        }
+    } while (room->players[room->current_drawer_idx] == NULL || 
+             room->players[room->current_drawer_idx]->has_drawn);
+    
+    // Mark this player as having drawn
+    room->players[room->current_drawer_idx]->has_drawn = true;
+    
+    printf("[GAME] Round %d/%d - Player %d (%s) is drawing\n", 
+           room->round_number, room->total_rounds, room->current_drawer_idx,
+           room->players[room->current_drawer_idx]->username);
     
     // Select random word
     const char* word = get_random_word();
@@ -196,6 +277,14 @@ void end_game(Room* room) {
     if (winner) {
         log_room_event(room->room_id, "game_ended", winner->username);
     }
+    
+    // Broadcast game end with final scores
+    char* room_state = json_create_room_state(room);
+    broadcast_to_room(room, MSG_GAME_END, room_state, NULL);
+    free(room_state);
+    
+    printf("[GAME] Game ended for room %u. Winner: %s with %d points\n",
+           room->room_id, winner ? winner->username : "none", max_score);
 }
 
 int process_guess(Room* room, Player* player, const char* guess) {
@@ -271,6 +360,44 @@ void update_timer(Room* room) {
     }
     
     log_timer(room->room_id, room->time_remaining);
+}
+
+void check_game_start_countdown(Room* room) {
+    if (!room->countdown_active || room->state != ROOM_WAITING) return;
+    
+    uint64_t elapsed = (get_current_time_ms() - room->game_start_countdown) / 1000;
+    int remaining = 15 - (int)elapsed;
+    
+    // Broadcast countdown update to players
+    if (remaining > 0 && remaining <= 15) {
+        char countdown_msg[128];
+        snprintf(countdown_msg, sizeof(countdown_msg), "{\"countdown\":%d}", remaining);
+        broadcast_to_room(room, MSG_COUNTDOWN_UPDATE, countdown_msg, NULL);
+    }
+    
+    // Start game after 15 seconds if at least 2 players and round hasn't started
+    if (elapsed >= 15 && room->player_count >= 2) {
+        printf("[COUNTDOWN] Starting game for room %u after %llu seconds with %d players\n", 
+               room->room_id, elapsed, room->player_count);
+        room->countdown_active = false;
+        start_game(room);
+        
+        // Notify all players with MSG_GAME_START
+        char* game_state = json_create_room_state(room);
+        broadcast_to_room(room, MSG_GAME_START, game_state, NULL);
+        free(game_state);
+        
+        // Send the actual word to the drawer
+        if (room->players[room->current_drawer_idx]) {
+            char word_msg[256];
+            snprintf(word_msg, sizeof(word_msg), 
+                     "{\"word\":\"%s\"}", room->current_word);
+            send_tcp_message(room->players[room->current_drawer_idx]->fd, 
+                           MSG_WORD_TO_DRAW, word_msg);
+        }
+        
+        log_room_event(room->room_id, "game_started_countdown", "");
+    }
 }
 
 void add_stroke(Room* room, const Stroke* stroke) {

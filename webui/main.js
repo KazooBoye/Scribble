@@ -64,9 +64,14 @@ class Game {
         document.getElementById('btn-clear').onclick = () => this.clearCanvas();
         
         // Drawing tools
-        document.getElementById('color-picker').onchange = (e) => {
-            this.canvas.setColor(e.target.value);
-        };
+        // Color palette buttons
+        document.querySelectorAll('.color-btn').forEach(btn => {
+            btn.onclick = () => {
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                this.canvas.setColor(parseInt(btn.dataset.color));
+            };
+        });
         
         document.getElementById('brush-size').oninput = (e) => {
             this.canvas.setLineWidth(e.target.value);
@@ -78,7 +83,7 @@ class Game {
         document.getElementById('btn-leave').onclick = () => this.leaveGame();
         
         // Game end dialog
-        document.getElementById('btn-play-again').onclick = () => this.playAgain();
+        document.getElementById('btn-return-home').onclick = () => this.returnToHome();
     }
     
     setupMessageHandlers() {
@@ -92,6 +97,7 @@ class Game {
         this.ws.on(MSG_TYPE.CHAT_BROADCAST, (data) => this.handleChatBroadcast(data));
         this.ws.on(MSG_TYPE.GUESS_CORRECT, (data) => this.handleGuessCorrect(data));
         this.ws.on(MSG_TYPE.TIMER_UPDATE, (data) => this.handleTimerUpdate(data));
+        this.ws.on(MSG_TYPE.COUNTDOWN_UPDATE, (data) => this.handleCountdownUpdate(data));
         this.ws.on(MSG_TYPE.PLAYER_JOIN, (data) => this.handlePlayerJoin(data));
         this.ws.on(MSG_TYPE.PLAYER_LEAVE, (data) => this.handlePlayerLeave(data));
         this.ws.on(MSG_TYPE.SCORE_UPDATE, (data) => this.handleScoreUpdate(data));
@@ -254,6 +260,30 @@ class Game {
         this.playNow();
     }
     
+    returnToHome() {
+        // Hide the game end dialog
+        document.getElementById('game-end-dialog').classList.add('hidden');
+        
+        // Reset game state
+        this.roomId = null;
+        this.isDrawing = false;
+        this.players = [];
+        this.canvas.clear();
+        this.canvas.enable(false);
+        
+        // Clear UI
+        document.getElementById('chat-box').innerHTML = '';
+        document.getElementById('players-list').innerHTML = '';
+        document.getElementById('word-mask').textContent = 'Waiting for players...';
+        document.getElementById('round-number').textContent = '0';
+        document.getElementById('total-rounds').textContent = '0';
+        document.getElementById('timer').textContent = '90';
+        
+        // Return to landing page
+        this.showScreen('landing-page');
+        this.showStatus('Ready to play again!', 'info');
+    }
+    
     // Message handlers
     handleRegisterAck(data) {
         this.playerId = data.player_id;
@@ -277,8 +307,10 @@ class Game {
         this.roomId = data.room_id;
         this.players = data.players || [];
         
+        // Always show game page when room is joined
+        this.showScreen('game-page');
+        
         if (isInitialJoin) {
-            this.showScreen('game-page');
             
             if (data.room_code) {
                 document.getElementById('room-code').textContent = data.room_code;
@@ -293,6 +325,10 @@ class Game {
     
     handleGameStart(data) {
         console.log('[GAME] Game started with data:', data);
+        
+        // Hide countdown display
+        document.getElementById('countdown-display').classList.add('hidden');
+        
         this.players = data.players || [];
         this.updatePlayersList();
         this.canvas.clear();
@@ -303,6 +339,9 @@ class Game {
         }
         if (data.round !== undefined) {
             document.getElementById('round-number').textContent = data.round;
+        }
+        if (data.total_rounds !== undefined) {
+            document.getElementById('total-rounds').textContent = data.total_rounds;
         }
         if (data.time_remaining !== undefined) {
             this.startTimer(data.time_remaining);
@@ -315,6 +354,10 @@ class Game {
             this.canvas.enable(true);
             document.getElementById('drawing-tools').classList.remove('hidden');
             this.showStatus('Your turn to draw!', 'info');
+            // Drawer will receive MSG_WORD_TO_DRAW separately, but if we have the word in data, show it
+            if (data.word) {
+                document.getElementById('word-mask').textContent = data.word;
+            }
         } else {
             this.isDrawing = false;
             this.canvas.enable(false);
@@ -326,10 +369,15 @@ class Game {
     }
     
     handleWordToDraw(data) {
+        console.log('[GAME] Received word to draw:', data.word);
         this.isDrawing = true;
         this.canvas.enable(true);
         document.getElementById('drawing-tools').classList.remove('hidden');
-        document.getElementById('word-mask').textContent = data.word;
+        // Force update the word display - this is the authoritative word for the drawer
+        if (data.word) {
+            document.getElementById('word-mask').textContent = data.word;
+            console.log('[GAME] Word display updated to:', data.word);
+        }
         this.showStatus('Your turn to draw!', 'info');
         this.addChatMessage('System', `Your word is: ${data.word}`, 'system');
     }
@@ -347,6 +395,9 @@ class Game {
         if (data.round !== undefined) {
             document.getElementById('round-number').textContent = data.round;
         }
+        if (data.total_rounds !== undefined) {
+            document.getElementById('total-rounds').textContent = data.total_rounds;
+        }
         if (data.time_remaining !== undefined) {
             this.startTimer(data.time_remaining);
         }
@@ -361,12 +412,16 @@ class Game {
             this.canvas.enable(true);
             document.getElementById('drawing-tools').classList.remove('hidden');
             this.showStatus('Your turn to draw!', 'info');
+            // Drawer will receive MSG_WORD_TO_DRAW separately, but if we have the word in data, show it
+            if (data.word) {
+                document.getElementById('word-mask').textContent = data.word;
+            }
         } else {
             console.log('[GAME] I am NOT the drawer for this round');
             this.isDrawing = false;
             this.canvas.enable(false);
             document.getElementById('drawing-tools').classList.add('hidden');
-            this.showStatus('New round! Guess the word!', 'info');
+            this.showStatus('Guess the word!', 'info');
         }
         
         this.addChatMessage('System', 'New round started!', 'system');
@@ -387,7 +442,15 @@ class Game {
     }
     
     handleGuessCorrect(data) {
+        console.log('[GAME] Player guessed correctly:', data);
+        // Always show the notification, even if it's the current player
         this.addChatMessage('System', `${data.username} guessed correctly!`, 'correct');
+        
+        // Show special feedback if it's the current player who guessed
+        if (data.player_id === this.playerId) {
+            this.showStatus('Correct! 🎉', 'success');
+        }
+        
         // Refresh scores
         if (data.player_id && data.score !== undefined) {
             const player = this.players.find(p => p.player_id === data.player_id);
@@ -402,6 +465,18 @@ class Game {
         if (data.time_remaining !== undefined) {
             // Just update the display, don't restart client-side timer
             document.getElementById('timer').textContent = data.time_remaining;
+        }
+    }
+    
+    handleCountdownUpdate(data) {
+        const countdownDisplay = document.getElementById('countdown-display');
+        const countdownTimer = document.getElementById('countdown-timer');
+        
+        if (data.countdown !== undefined && data.countdown > 0) {
+            countdownTimer.textContent = data.countdown;
+            countdownDisplay.classList.remove('hidden');
+        } else {
+            countdownDisplay.classList.add('hidden');
         }
     }
     
@@ -447,24 +522,39 @@ class Game {
     }
     
     handleGameEnd(data) {
+        console.log('[GAME] Game ended:', data);
         const dialog = document.getElementById('game-end-dialog');
-        const scoresEl = document.getElementById('final-scores');
+        const rankingsEl = document.getElementById('final-scores');
         
-        scoresEl.innerHTML = '';
+        rankingsEl.innerHTML = '';
         
         if (data.players) {
             const sorted = data.players.sort((a, b) => b.score - a.score);
             sorted.forEach((player, idx) => {
                 const item = document.createElement('div');
-                item.className = 'score-item';
-                if (idx === 0) item.classList.add('winner');
+                item.className = 'ranking-item';
                 
-                item.innerHTML = `
-                    <span>${idx + 1}. ${player.username}</span>
-                    <span>${player.score} pts</span>
-                `;
+                // Add special classes for top 3
+                if (idx === 0) item.classList.add('first');
+                else if (idx === 1) item.classList.add('second');
+                else if (idx === 2) item.classList.add('third');
                 
-                scoresEl.appendChild(item);
+                const position = document.createElement('span');
+                position.className = 'ranking-position';
+                position.textContent = `#${idx + 1}`;
+                
+                const name = document.createElement('span');
+                name.className = 'ranking-name';
+                name.textContent = player.username + (idx === 0 ? ' 👑' : '');
+                
+                const score = document.createElement('span');
+                score.className = 'ranking-score';
+                score.textContent = `${player.score} pts`;
+                
+                item.appendChild(position);
+                item.appendChild(name);
+                item.appendChild(score);
+                rankingsEl.appendChild(item);
             });
         }
         

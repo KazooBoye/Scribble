@@ -14,6 +14,7 @@ void end_round(Room* room);
 void end_game(Room* room);
 int process_guess(Room* room, Player* player, const char* guess);
 void update_timer(Room* room);
+void check_game_start_countdown(Room* room);
 void add_stroke(Room* room, const Stroke* stroke);
 void cleanup_word_list();
 

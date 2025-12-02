@@ -6,11 +6,25 @@ class DrawingCanvas {
         this.isDrawing = false;
         this.lastX = 0;
         this.lastY = 0;
-        this.color = '#000000';
+        this.colorIndex = 0;  // Default to black
         this.lineWidth = 5;
         this.enabled = false;
         this.strokeBuffer = [];
         this.strokeId = 0;
+        
+        // Color palette (index -> hex)
+        this.colors = [
+            '#000000', // 0: Black
+            '#FF0000', // 1: Red
+            '#00FF00', // 2: Green
+            '#0000FF', // 3: Blue
+            '#FFFF00', // 4: Yellow
+            '#FF00FF', // 5: Magenta
+            '#00FFFF', // 6: Cyan
+            '#FFA500', // 7: Orange
+            '#800080', // 8: Purple
+            '#8B4513'  // 9: Brown
+        ];
         
         this.setupEventListeners();
         this.clear();
@@ -66,7 +80,7 @@ class DrawingCanvas {
         const y = e.clientY - rect.top;
         
         // Draw locally
-        this.drawLine(this.lastX, this.lastY, x, y, this.color, this.lineWidth);
+        this.drawLine(this.lastX, this.lastY, x, y, this.colors[this.colorIndex], this.lineWidth);
         
         // Send stroke to server via WebSocket
         if (window.game && window.game.ws.connected) {
@@ -76,7 +90,7 @@ class DrawingCanvas {
                 y1: this.lastY,
                 x2: x,
                 y2: y,
-                color: this.hexToInt(this.color),
+                color: this.colorIndex,
                 thickness: this.lineWidth,
                 timestamp: Date.now()
             };
@@ -106,7 +120,8 @@ class DrawingCanvas {
     }
     
     drawStroke(stroke) {
-        const color = this.intToHex(stroke.color);
+        const colorIndex = stroke.color || 0;
+        const color = this.colors[colorIndex] || this.colors[0];
         this.drawLine(stroke.x1, stroke.y1, stroke.x2, stroke.y2, color, stroke.thickness);
     }
     
@@ -115,8 +130,8 @@ class DrawingCanvas {
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     }
     
-    setColor(color) {
-        this.color = color;
+    setColor(colorIndex) {
+        this.colorIndex = colorIndex;
     }
     
     setLineWidth(width) {
@@ -126,13 +141,5 @@ class DrawingCanvas {
     enable(enabled) {
         this.enabled = enabled;
         this.canvas.style.cursor = enabled ? 'crosshair' : 'not-allowed';
-    }
-    
-    hexToInt(hex) {
-        return parseInt(hex.replace('#', ''), 16);
-    }
-    
-    intToHex(int) {
-        return '#' + int.toString(16).padStart(6, '0');
     }
 }

@@ -1,6 +1,7 @@
 #include "matchmaking.h"
 #include "../utils/logger.h"
 #include "../utils/json.h"
+#include "../utils/timer.h"
 #include "../tcp/tcp_handler.h"
 #include "game_logic.h"
 #include <stdlib.h>
@@ -33,7 +34,8 @@ Room* find_room_by_id(uint32_t room_id) {
 void iterate_active_rooms(void (*callback)(Room*)) {
     pthread_mutex_lock(&matchmaking_mutex);
     for (int i = 0; i < MAX_ROOMS; i++) {
-        if (rooms[i].player_count > 0 && rooms[i].state == ROOM_PLAYING) {
+        if (rooms[i].player_count > 0 && 
+            (rooms[i].state == ROOM_PLAYING || rooms[i].state == ROOM_WAITING)) {
             callback(&rooms[i]);
         }
     }
@@ -104,7 +106,8 @@ int join_matchmaking(Player* player) {
         if (rooms[i].player_count > 0 && 
             rooms[i].player_count < MAX_PLAYERS &&
             !rooms[i].is_private &&
-            rooms[i].state == ROOM_WAITING) {
+            rooms[i].state == ROOM_WAITING &&
+            rooms[i].round_number <= 1) {
             
             // Calculate average latency of room
             uint64_t avg_latency = 0;
@@ -142,8 +145,18 @@ int join_matchmaking(Player* player) {
     
     add_player_to_room(best_room, player);
     
-    // Start game if room is full
+    // Start countdown timer when 2nd player joins
+    if (best_room->player_count == 2 && !best_room->countdown_active) {
+        best_room->countdown_active = true;
+        best_room->game_start_countdown = get_current_time_ms();
+        printf("[COUNTDOWN] Room %u countdown started with %d players at timestamp %llu\n", 
+               best_room->room_id, best_room->player_count, best_room->game_start_countdown);
+        log_room_event(best_room->room_id, "countdown_started", "15s until game starts");
+    }
+    
+    // Start game immediately if room is full
     if (best_room->player_count == MAX_PLAYERS && best_room->state == ROOM_WAITING) {
+        best_room->countdown_active = false;
         start_game(best_room);
         
         // Notify all players with MSG_GAME_START

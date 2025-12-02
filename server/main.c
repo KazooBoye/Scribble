@@ -21,6 +21,7 @@ void signal_handler(int signum) {
 }
 
 void timer_update_callback(Room* room) {
+    check_game_start_countdown(room);
     update_timer(room);
     
     // Broadcast timer update to all players

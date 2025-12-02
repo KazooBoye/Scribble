@@ -79,10 +79,10 @@ char* json_create_room_state(const Room* room) {
     
     snprintf(buffer, BUFFER_SIZE * 2,
              "{\"room_id\":%u,\"room_code\":\"%s\",\"player_count\":%d,\"state\":%d,"
-             "\"current_drawer\":%d,\"word_mask\":\"%s\",\"round\":%d,\"time_remaining\":%d,"
+             "\"current_drawer\":%d,\"word_mask\":\"%s\",\"round\":%d,\"total_rounds\":%d,\"time_remaining\":%d,"
              "\"players\":%s}",
              room->room_id, room->room_code, room->player_count, room->state,
-             room->current_drawer_idx, word_mask, room->round_number, room->time_remaining,
+             room->current_drawer_idx, word_mask, room->round_number, room->total_rounds, room->time_remaining,
              players_json);
     
     return buffer;
