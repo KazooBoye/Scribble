@@ -1,1 +1,0 @@
-cp -r webui/* build/webui/ && pkill -9 scribble_server && pkill -9 scribble_proxy && sleep 1 && cd build && (./scribble_server &) && sleep 1 && ./scribble_proxy

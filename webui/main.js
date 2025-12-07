@@ -577,14 +577,18 @@ class Game {
     }
     
     handleStroke(data) {
-        console.log('[GAME] Received stroke:', data, 'isDrawing:', this.isDrawing);
+        console.log('[GAME] Received stroke:', data, 'myPlayerId:', this.playerId, 'strokePlayerId:', data.player_id);
         // Draw stroke received from other players
-        // Only draw if we're not the drawer (strokes are only broadcast to others)
-        if (!this.isDrawing) {
-            console.log('[GAME] Drawing stroke on canvas');
+        // Only draw if the stroke is from a different player (server excludes sender, but double-check)
+        if (data.player_id && data.player_id !== this.playerId) {
+            console.log('[GAME] Drawing stroke from player', data.player_id, 'on canvas');
+            this.canvas.drawStroke(data);
+        } else if (!data.player_id) {
+            // Fallback: if no player_id, use old logic (shouldn't happen with updated server)
+            console.log('[GAME] Drawing stroke (no player_id) - using fallback logic');
             this.canvas.drawStroke(data);
         } else {
-            console.log('[GAME] Ignoring stroke - I am the drawer');
+            console.log('[GAME] Ignoring stroke - it is from myself (player_id:', data.player_id, ')');
         }
     }
 }

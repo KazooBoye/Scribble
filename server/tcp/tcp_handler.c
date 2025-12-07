@@ -14,10 +14,17 @@
 static uint32_t next_player_id = 1;
 
 void send_tcp_message(int fd, MessageType type, const char* json_data) {
+    const char* type_names[] = {"PING", "PONG", "REGISTER", "REGISTER_ACK", "JOIN_ROOM", "CREATE_ROOM",
+                                "ROOM_CREATED", "ROOM_JOINED", "ROOM_FULL", "ROOM_NOT_FOUND", "GAME_START",
+                                "YOUR_TURN", "WORD_TO_DRAW", "ROUND_START", "CHAT", "CHAT_BROADCAST",
+                                "GUESS_CORRECT", "GUESS_WRONG", "TIMER_UPDATE", "COUNTDOWN_UPDATE",
+                                "ROUND_END", "GAME_END", "PLAYER_JOIN", "PLAYER_LEAVE", "SCORE_UPDATE"};
+    const char* type_name = (type >= 0 && type < 25) ? type_names[type] : "UNKNOWN";
+    
     char* json_msg = json_create_message(type, json_data);
     if (!json_msg) return;
     
-    printf("[TCP] send_tcp_message: type=%d, json_msg=%s\n", type, json_msg);
+    printf("[TCP] send_tcp_message: type=%d (%s), fd=%d, json_msg=%s\n", type, type_name, fd, json_msg);
     
     char buffer[BUFFER_SIZE];
     int len = serialize_tcp_message(type, json_msg, buffer, sizeof(buffer));
@@ -288,7 +295,16 @@ void handle_stroke(Player* player, const char* json) {
                      "%s,\"player_id\":%u}", stroke_data, player->player_id);
             
             printf("[TCP] STROKE: Broadcasting data: %s\n", stroke_with_id);
-            printf("[TCP] STROKE: Room has %d players, excluding sender\n", room->player_count);
+            printf("[TCP] STROKE: Room has %d players, excluding sender (player_id=%u)\n", 
+                   room->player_count, player->player_id);
+            
+            // Log each recipient
+            for (int i = 0; i < room->player_count; i++) {
+                if (room->players[i] && room->players[i] != player) {
+                    printf("[TCP] STROKE: -> Sending to player %u (%s)\n",
+                           room->players[i]->player_id, room->players[i]->username);
+                }
+            }
             
             // Broadcast - send_tcp_message will wrap it as {"type":100,"data":...}
             broadcast_to_room(room, UDP_STROKE, stroke_with_id, player);

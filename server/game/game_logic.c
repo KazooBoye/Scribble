@@ -230,6 +230,9 @@ void start_next_round(Room* room) {
             room->players[i]->has_guessed = false;
             room->players[i]->state = room->players[i]->is_drawing ? 
                                       PLAYER_DRAWING : PLAYER_GUESSING;
+            printf("[GAME] Player %u (%s) - is_drawing: %d, state: %d\n",
+                   room->players[i]->player_id, room->players[i]->username,
+                   room->players[i]->is_drawing, room->players[i]->state);
         }
     }
     
@@ -256,8 +259,15 @@ void end_round(Room* room) {
         char word_msg[256];
         snprintf(word_msg, sizeof(word_msg), 
                  "{\"word\":\"%s\"}", room->current_word);
+        printf("[GAME] Sending MSG_WORD_TO_DRAW to player %u (%s) - word: %s\n",
+               room->players[room->current_drawer_idx]->player_id,
+               room->players[room->current_drawer_idx]->username,
+               room->current_word);
         send_tcp_message(room->players[room->current_drawer_idx]->fd, 
                        MSG_WORD_TO_DRAW, word_msg);
+    } else {
+        printf("[GAME] ERROR: current_drawer_idx=%d but player is NULL!\n", 
+               room->current_drawer_idx);
     }
 }
 
@@ -392,8 +402,15 @@ void check_game_start_countdown(Room* room) {
             char word_msg[256];
             snprintf(word_msg, sizeof(word_msg), 
                      "{\"word\":\"%s\"}", room->current_word);
+            printf("[GAME] COUNTDOWN COMPLETE - Sending MSG_WORD_TO_DRAW to player %u (%s) - word: %s\n",
+                   room->players[room->current_drawer_idx]->player_id,
+                   room->players[room->current_drawer_idx]->username,
+                   room->current_word);
             send_tcp_message(room->players[room->current_drawer_idx]->fd, 
                            MSG_WORD_TO_DRAW, word_msg);
+        } else {
+            printf("[GAME] COUNTDOWN COMPLETE ERROR: current_drawer_idx=%d but player is NULL!\n", 
+                   room->current_drawer_idx);
         }
         
         log_room_event(room->room_id, "game_started_countdown", "");

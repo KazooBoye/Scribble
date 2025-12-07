@@ -409,14 +409,16 @@ void* ws_thread_func(void* arg) {
                     close(ws_clients[i].tcp_fd);
                     ws_clients[i].tcp_fd = -1;
                 } else {
-                    // Deserialize length-prefixed message
-                    if (bytes >= 4) {
+                    // Deserialize ALL length-prefixed messages in the buffer
+                    int offset = 0;
+                    while (offset + 4 <= bytes) {
                         uint32_t json_len;
-                        memcpy(&json_len, buffer, 4);
+                        memcpy(&json_len, buffer + offset, 4);
                         json_len = ntohl(json_len);
                         
-                        if (bytes >= 4 + (int)json_len) {
-                            char* json_payload = buffer + 4;
+                        // Check if we have the complete message
+                        if (offset + 4 + (int)json_len <= bytes) {
+                            char* json_payload = buffer + offset + 4;
                             printf("[TCP] Client %d received: %.*s\n", ws_clients[i].client_id, (int)json_len, json_payload);
                             
                             // Encode as WebSocket frame and send to browser
@@ -425,6 +427,14 @@ void* ws_thread_func(void* arg) {
                             if (frame_len > 0 && ws_clients[i].ws_fd > 0) {
                                 send(ws_clients[i].ws_fd, ws_frame, frame_len, 0);
                             }
+                            
+                            // Move to next message
+                            offset += 4 + json_len;
+                        } else {
+                            // Incomplete message, break and wait for more data
+                            printf("[TCP] Client %d: Incomplete message in buffer (need %u bytes, have %d)\n", 
+                                   ws_clients[i].client_id, json_len, bytes - offset - 4);
+                            break;
                         }
                     }
                 }

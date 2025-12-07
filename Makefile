@@ -20,6 +20,7 @@ SERVER_DIR = server
 CLIENT_DIR = client_proxy
 WEBUI_DIR = webui
 BUILD_DIR = build
+LOGS_DIR = logs
 
 # Server source files
 SERVER_SRCS = \
@@ -113,12 +114,14 @@ $(BUILD_DIR)/client/%.o: $(CLIENT_DIR)/%.c
 # Run server
 run-server: server
 	@echo "[RUN] Starting game server..."
-	@cd $(BUILD_DIR) && ./scribble_server
+	@mkdir -p $(LOGS_DIR)
+	@cd $(BUILD_DIR) && ./scribble_server 2>&1 | tee ../$(LOGS_DIR)/server.log
 
 # Run client proxy
 run-client: client
 	@echo "[RUN] Starting client proxy..."
-	@cd $(BUILD_DIR) && ./scribble_proxy
+	@mkdir -p $(LOGS_DIR)
+	@cd $(BUILD_DIR) && ./scribble_proxy 2>&1 | tee ../$(LOGS_DIR)/proxy.log
 
 # Run both (in separate terminals)
 run: all
@@ -126,11 +129,12 @@ run: all
 	@echo "║         Starting Scribble Game           ║"
 	@echo "╚══════════════════════════════════════════╝"
 	@echo ""
+	@mkdir -p $(LOGS_DIR)
 	@echo "1. Starting server in background..."
-	@cd $(BUILD_DIR) && ./scribble_server > server.log 2>&1 &
+	@cd $(BUILD_DIR) && ./scribble_server > ../$(LOGS_DIR)/server.log 2>&1 &
 	@sleep 2
 	@echo "2. Starting client proxy in background..."
-	@cd $(BUILD_DIR) && ./scribble_proxy > proxy.log 2>&1 &
+	@cd $(BUILD_DIR) && ./scribble_proxy > ../$(LOGS_DIR)/proxy.log 2>&1 &
 	@sleep 1
 	@echo ""
 	@echo "✓ Server running on:"
@@ -144,7 +148,7 @@ run: all
 	@echo "Open http://localhost:8080 in your browser to play!"
 	@echo ""
 	@echo "To stop: make stop"
-	@echo "To view logs: tail -f build/server.log build/proxy.log"
+	@echo "To view logs: tail -f logs/server.log logs/proxy.log"
 
 # Stop all processes
 stop:
@@ -159,6 +163,16 @@ clean:
 	@rm -rf $(BUILD_DIR)
 	@echo "[CLEAN] Clean complete"
 
+# Clean logs
+clean-logs:
+	@echo "[CLEAN] Removing logs directory..."
+	@rm -rf $(LOGS_DIR)
+	@echo "[CLEAN] Logs cleaned"
+
+# Clean everything
+clean-all: clean clean-logs
+	@echo "[CLEAN] Everything cleaned"
+
 # Install (copy files to build directory)
 install: all
 	@echo "[INSTALL] Copying webui files..."
@@ -170,6 +184,12 @@ install: all
 
 # Development - rebuild and run
 dev: clean all install run
+
+# View logs
+logs:
+	@echo "[LOGS] Tailing server and proxy logs..."
+	@echo "Press Ctrl+C to stop"
+	@tail -f $(LOGS_DIR)/server.log $(LOGS_DIR)/proxy.log
 
 # Help
 help:
@@ -185,7 +205,10 @@ help:
 	@echo "  make run-server  - Run server only"
 	@echo "  make run-client  - Run client proxy only"
 	@echo "  make install     - Copy resources to build directory"
+	@echo "  make logs        - View server and proxy logs"
 	@echo "  make clean       - Remove build files"
+	@echo "  make clean-logs  - Remove log files"
+	@echo "  make clean-all   - Remove build and log files"
 	@echo "  make stop        - Stop all running processes"
 	@echo "  make dev         - Clean, build, and run (development)"
 	@echo "  make help        - Show this help"
