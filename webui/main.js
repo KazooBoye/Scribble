@@ -179,6 +179,22 @@ class Game {
         }, 3000);
     }
     
+    getPlayerAvatar(playerId) {
+        // Funny cartoonish avatars for each player
+        const avatars = ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', 
+                         '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦆', '🦉'];
+        const colors = ['#ffadad', '#ffd6a5', '#fdffb6', '#caffbf', '#9bf6ff', 
+                       '#a0c4ff', '#bdb2ff', '#ffc6ff', '#ffb5e8', '#ff9cee'];
+        
+        const avatarIndex = (playerId - 1) % avatars.length;
+        const colorIndex = (playerId - 1) % colors.length;
+        
+        return {
+            emoji: avatars[avatarIndex],
+            color: colors[colorIndex]
+        };
+    }
+    
     updatePlayersList() {
         const listEl = document.getElementById('players-list');
         listEl.innerHTML = '';
@@ -195,24 +211,72 @@ class Game {
                 item.classList.add('drawing');
             }
             
-            const onlineStatus = player.online !== false ? '🟢' : '⚫';
+            const avatar = this.getPlayerAvatar(player.player_id);
+            const onlineClass = player.online !== false ? '' : 'offline';
             
             item.innerHTML = `
-                <span class="player-status">${onlineStatus}</span>
-                <span class="player-name">${player.username}</span>
-                <span class="player-score">${player.score} pts</span>
+                <div class="player-avatar" style="background-color: ${avatar.color}">
+                    ${avatar.emoji}
+                    <div class="player-status ${onlineClass}"></div>
+                </div>
+                <div class="player-info">
+                    <div class="player-name">${player.username}</div>
+                    <div class="player-score">⭐ ${player.score} pts</div>
+                </div>
             `;
             
             listEl.appendChild(item);
         });
     }
     
-    addChatMessage(sender, message, type = 'normal') {
+    showCanvasMessage(message) {
+        // Create overlay if it doesn't exist
+        let overlay = document.getElementById('canvas-overlay');
+        const canvas = document.getElementById('drawing-canvas');
+        
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'canvas-overlay';
+            
+            // Create wrapper to position overlay properly
+            const wrapper = document.createElement('div');
+            wrapper.style.position = 'relative';
+            wrapper.style.display = 'inline-block';
+            
+            // Wrap canvas
+            canvas.parentNode.insertBefore(wrapper, canvas);
+            wrapper.appendChild(canvas);
+            wrapper.appendChild(overlay);
+        }
+        
+        overlay.innerHTML = `<div id="canvas-message">${message}</div>`;
+        overlay.style.display = 'flex';
+        
+        // Grey out canvas
+        canvas.classList.add('disabled');
+    }
+    
+    hideCanvasMessage() {
+        const overlay = document.getElementById('canvas-overlay');
+        if (overlay) {
+            overlay.style.display = 'none';
+        }
+        const canvas = document.getElementById('drawing-canvas');
+        if (canvas) {
+            canvas.classList.remove('disabled');
+        }
+    }
+    
+    addChatMessage(sender, message, type = 'normal', subtype = '') {
         const chatBox = document.getElementById('chat-box');
         const msgEl = document.createElement('div');
         msgEl.className = 'chat-message ' + type;
         
-        if (type === 'system') {
+        if (subtype) {
+            msgEl.classList.add(subtype);
+        }
+        
+        if (type === 'system' || type === 'correct') {
             msgEl.textContent = message;
         } else {
             msgEl.innerHTML = `
@@ -279,6 +343,9 @@ class Game {
         document.getElementById('total-rounds').textContent = '0';
         document.getElementById('timer').textContent = '90';
         
+        // Hide canvas message
+        this.hideCanvasMessage();
+        
         // Return to landing page
         this.showScreen('landing-page');
         this.showStatus('Ready to play again!', 'info');
@@ -296,7 +363,7 @@ class Game {
         document.getElementById('room-code').textContent = data.room_code;
         this.showScreen('game-page');
         this.showStatus(`Room created! Code: ${data.room_code}`, 'info');
-        this.addChatMessage('System', `Waiting for players... Share code: ${data.room_code}`, 'system');
+        this.addChatMessage('System', `Waiting for players... Share code: ${data.room_code}`, 'system', 'alert');
     }
     
     handleRoomJoined(data) {
@@ -317,8 +384,11 @@ class Game {
             }
             
             this.showStatus('Joined room! Waiting for more players...', 'info');
-            this.addChatMessage('System', 'You joined the room', 'system');
+            this.addChatMessage('System', 'You joined the room', 'system', 'alert');
         }
+        
+        // Show waiting message on canvas
+        this.showCanvasMessage('🎨 Waiting for players...');
         
         this.updatePlayersList();
     }
@@ -328,6 +398,9 @@ class Game {
         
         // Hide countdown display
         document.getElementById('countdown-display').classList.add('hidden');
+        
+        // Hide canvas message - game is starting!
+        this.hideCanvasMessage();
         
         this.players = data.players || [];
         this.updatePlayersList();
@@ -365,7 +438,7 @@ class Game {
             this.showStatus('Game started! Guess the word!', 'info');
         }
         
-        this.addChatMessage('System', 'Game started! Good luck!', 'system');
+        this.addChatMessage('System', 'Game started! Good luck!', 'system', 'game-alert');
     }
     
     handleWordToDraw(data) {
@@ -379,7 +452,7 @@ class Game {
             console.log('[GAME] Word display updated to:', data.word);
         }
         this.showStatus('Your turn to draw!', 'info');
-        this.addChatMessage('System', `Your word is: ${data.word}`, 'system');
+        this.addChatMessage('System', `Your word is: ${data.word}`, 'system', 'game-alert');
     }
     
     handleRoundStart(data) {
@@ -424,7 +497,7 @@ class Game {
             this.showStatus('Guess the word!', 'info');
         }
         
-        this.addChatMessage('System', 'New round started!', 'system');
+        this.addChatMessage('System', 'New round started!', 'system', 'game-alert');
     }
     
     handleChatBroadcast(data) {
@@ -433,7 +506,7 @@ class Game {
     
     handleRoundEnd(data) {
         console.log('[GAME] Round ended');
-        this.addChatMessage('System', 'Round ended!', 'system');
+        this.addChatMessage('System', 'Round ended!', 'system', 'game-alert');
         // Update players and scores
         if (data.players) {
             this.players = data.players;
@@ -444,7 +517,7 @@ class Game {
     handleGuessCorrect(data) {
         console.log('[GAME] Player guessed correctly:', data);
         // Always show the notification, even if it's the current player
-        this.addChatMessage('System', `${data.username} guessed correctly!`, 'correct');
+        this.addChatMessage('System', `${data.username} guessed correctly!`, 'system', 'game-alert');
         
         // Show special feedback if it's the current player who guessed
         if (data.player_id === this.playerId) {
@@ -475,8 +548,12 @@ class Game {
         if (data.countdown !== undefined && data.countdown > 0) {
             countdownTimer.textContent = data.countdown;
             countdownDisplay.classList.remove('hidden');
+            
+            // Show countdown on canvas
+            this.showCanvasMessage(`🚀 Game starting in ${data.countdown}...`);
         } else {
             countdownDisplay.classList.add('hidden');
+            this.hideCanvasMessage();
         }
     }
     
@@ -492,12 +569,12 @@ class Game {
     }
     
     handlePlayerJoin(data) {
-        this.addChatMessage('System', `${data.username} joined`, 'system');
+        this.addChatMessage('System', `${data.username} joined`, 'system', 'alert');
         // Refresh player list
     }
     
     handlePlayerLeave(data) {
-        this.addChatMessage('System', `${data.username} left`, 'system');
+        this.addChatMessage('System', `${data.username} left`, 'system', 'alert');
         // Mark player as offline
         const player = this.players.find(p => p.player_id === data.player_id);
         if (player) {
