@@ -19,10 +19,8 @@
 #define BUFFER_SIZE 4096
 
 // Ports
-#define HTTP_PORT 8080
 #define TCP_PORT 9090
 #define UDP_PORT 9091
-#define WS_PORT 8081
 
 // Message Types (TCP)
 typedef enum {

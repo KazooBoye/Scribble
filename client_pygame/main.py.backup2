@@ -1,0 +1,1015 @@
+#!/usr/bin/env python3
+"""
+Scribble Game - Pygame Client
+UI in Python/Pygame, networking in C (via ctypes)
+Follows the same user flow as the Web UI
+"""
+
+import pygame
+import sys
+from network_wrapper import NetworkClient
+from protocol import MSG_TYPE, COLORS, get_color
+
+# Initialize Pygame
+pygame.init()
+
+# Constants
+WINDOW_WIDTH = 1400
+WINDOW_HEIGHT = 750
+SIDEBAR_WIDTH = 250
+CANVAS_WIDTH = 800
+CANVAS_HEIGHT = 600
+FPS = 60
+
+# Colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GRAY = (200, 200, 200)
+LIGHT_GRAY = (240, 240, 240)
+DARK_GRAY = (100, 100, 100)
+BLUE = (70, 130, 220)
+GREEN = (76, 175, 80)
+RED = (244, 67, 54)
+YELLOW = (255, 193, 7)
+
+# Game States
+STATE_LANDING = 0
+STATE_WAITING = 1
+STATE_PLAYING = 2
+STATE_ENDED = 3
+
+
+class Button:
+    def __init__(self, x, y, width, height, text, color=BLUE):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.text = text
+        self.color = color
+        self.hover = False
+        
+    def draw(self, screen, font):
+        color = tuple(min(c + 30, 255) for c in self.color) if self.hover else self.color
+        pygame.draw.rect(screen, color, self.rect, border_radius=5)
+        text_surface = font.render(self.text, True, WHITE)
+        text_rect = text_surface.get_rect(center=self.rect.center)
+        screen.blit(text_surface, text_rect)
+    
+    def handle_event(self, event):
+        if event.type == pygame.MOUSEMOTION:
+            self.hover = self.rect.collidepoint(event.pos)
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                return True
+        return False
+
+
+class InputBox:
+    def __init__(self, x, y, width, height, placeholder='', max_length=20):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.placeholder = placeholder
+        self.text = ''
+        self.max_length = max_length
+        self.active = False
+        
+    def draw(self, screen, font):
+        color = BLUE if self.active else GRAY
+        pygame.draw.rect(screen, WHITE, self.rect)
+        pygame.draw.rect(screen, color, self.rect, 2, border_radius=3)
+        
+        display_text = self.text if self.text else self.placeholder
+        text_color = BLACK if self.text else DARK_GRAY
+        text_surface = font.render(display_text, True, text_color)
+        screen.blit(text_surface, (self.rect.x + 10, self.rect.y + 10))
+        
+        # Cursor
+        if self.active:
+            cursor_x = self.rect.x + 10 + font.size(self.text)[0]
+            pygame.draw.line(screen, BLACK, 
+                           (cursor_x, self.rect.y + 8),
+                           (cursor_x, self.rect.y + self.rect.height - 8), 2)
+    
+    def handle_event(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            self.active = self.rect.collidepoint(event.pos)
+        elif event.type == pygame.KEYDOWN and self.active:
+            if event.key == pygame.K_BACKSPACE:
+                self.text = self.text[:-1]
+            elif len(self.text) < self.max_length and event.unicode.isprintable():
+                self.text += event.unicode
+
+
+class DrawingCanvas:
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.surface = pygame.Surface((width, height))
+        self.surface.fill(WHITE)
+        
+        self.drawing = False
+        self.last_pos = None
+        self.color_index = 0
+        self.line_width = 5
+        self.enabled = False
+        
+    def handle_mouse_down(self, pos):
+        if self.enabled and self.point_in_canvas(pos):
+            self.drawing = True
+            canvas_pos = (pos[0] - self.x, pos[1] - self.y)
+            self.last_pos = canvas_pos
+            
+    def handle_mouse_up(self, pos):
+        self.drawing = False
+        self.last_pos = None
+        
+    def handle_mouse_move(self, pos, network):
+        if self.drawing and self.enabled and self.point_in_canvas(pos):
+            canvas_pos = (pos[0] - self.x, pos[1] - self.y)
+            
+            if self.last_pos:
+                # Draw locally
+                color = get_color(self.color_index)
+                pygame.draw.line(self.surface, color, self.last_pos, canvas_pos, self.line_width)
+                
+                # Send stroke to server via TCP (server will broadcast to others)
+                network.send_tcp(MSG_TYPE.UDP_STROKE, {
+                    'x1': self.last_pos[0],
+                    'y1': self.last_pos[1],
+                    'x2': canvas_pos[0],
+                    'y2': canvas_pos[1],
+                    'color': self.color_index,
+                    'thickness': self.line_width
+                })
+            
+            self.last_pos = canvas_pos
+    
+    def point_in_canvas(self, pos):
+        return (self.x <= pos[0] <= self.x + self.width and
+                self.y <= pos[1] <= self.y + self.height)
+    
+    def draw_stroke(self, x1, y1, x2, y2, color_index, thickness):
+        """Draw stroke from server"""
+        color = get_color(color_index)
+        pygame.draw.line(self.surface, color, (x1, y1), (x2, y2), thickness)
+    
+    def clear(self):
+        self.surface.fill(WHITE)
+    
+    def set_color(self, index):
+        self.color_index = index
+    
+    def render(self, screen):
+        # Draw canvas
+        screen.blit(self.surface, (self.x, self.y))
+        # Draw border
+        border_color = BLUE if self.enabled else GRAY
+        pygame.draw.rect(screen, border_color, (self.x, self.y, self.width, self.height), 3)
+
+
+class ScribbleGame:
+    def __init__(self, host='localhost', tcp_port=9090, udp_port=9091):
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("Scribble - Drawing & Guessing Game")
+        self.clock = pygame.time.Clock()
+        self.running = True
+        
+        # Server connection config
+        self.server_host = host
+        self.server_tcp_port = tcp_port
+        self.server_udp_port = udp_port
+        
+        # Fonts
+        self.font_large = pygame.font.Font(None, 48)
+        self.font_medium = pygame.font.Font(None, 32)
+        self.font_small = pygame.font.Font(None, 24)
+        
+        # Game state
+        self.state = STATE_LANDING
+        self.connected = False
+        self.username = ""
+        self.player_id = None
+        self.session_token = None
+        self.room_id = None
+        self.room_code = ""
+        self.players = []
+        self.chat_messages = []
+        self.is_drawer = False
+        self.word_to_draw = ""
+        self.word_mask = "_ _ _ _"
+        self.timer = 0
+        self.countdown = 0
+        self.round_number = 0
+        self.total_rounds = 0
+        self.status_message = "Connecting to server..."
+        
+        # UI Components
+        # Layout: [Players Sidebar 250px] [Canvas 800px] [Chat Sidebar 250px] = 1300px + margins
+        self.canvas = DrawingCanvas(SIDEBAR_WIDTH + 20, 100, CANVAS_WIDTH, CANVAS_HEIGHT)
+        self.chat_input = ""
+        
+        # Landing screen UI
+        self.username_input = InputBox(400, 250, 400, 40, "Enter your name...", 20)
+        self.room_code_input = InputBox(400, 450, 200, 40, "ROOM CODE", 6)
+        
+        self.btn_play_now = Button(400, 320, 400, 50, "Play Now (Auto Matchmaking)", GREEN)
+        self.btn_create_room = Button(400, 380, 400, 50, "Create Private Room", BLUE)
+        self.btn_join_room = Button(610, 450, 190, 40, "Join Room", BLUE)
+        self.btn_return_home = Button(450, 600, 300, 50, "Return to Home", BLUE)
+        
+        # Drawing tools
+        self.btn_clear = Button(SIDEBAR_WIDTH + CANVAS_WIDTH - 180, 60, 150, 35, "Clear Canvas", RED)
+        
+        # Networking (C library via ctypes)
+        self.network = NetworkClient()
+        self.setup_network_handlers()
+        
+        # Connect to server
+        if self.network.connect(self.server_host, self.server_tcp_port, self.server_udp_port):
+            self.connected = True
+            self.status_message = f"✓ Connected to {self.server_host}!"
+        else:
+            self.status_message = f"✗ Failed to connect to {self.server_host}"
+    
+    def setup_network_handlers(self):
+        """Register message handlers"""
+        self.network.register_handler(MSG_TYPE.REGISTER_ACK, self.handle_register_ack)
+        self.network.register_handler(MSG_TYPE.ROOM_CREATED, self.handle_room_created)
+        self.network.register_handler(MSG_TYPE.ROOM_JOINED, self.handle_room_joined)
+        self.network.register_handler(MSG_TYPE.GAME_START, self.handle_game_start)
+        self.network.register_handler(MSG_TYPE.ROUND_START, self.handle_round_start)
+        self.network.register_handler(MSG_TYPE.YOUR_TURN, self.handle_your_turn)
+        self.network.register_handler(MSG_TYPE.WORD_TO_DRAW, self.handle_word_to_draw)
+        self.network.register_handler(MSG_TYPE.CHAT_BROADCAST, self.handle_chat)
+        self.network.register_handler(MSG_TYPE.UDP_STROKE, self.handle_draw_stroke)
+        self.network.register_handler(MSG_TYPE.UDP_CLEAR_CANVAS, self.handle_clear_canvas)
+        self.network.register_handler(MSG_TYPE.TIMER_UPDATE, self.handle_timer)
+        self.network.register_handler(MSG_TYPE.COUNTDOWN_UPDATE, self.handle_countdown)
+        self.network.register_handler(MSG_TYPE.PLAYER_JOIN, self.handle_player_join)
+        self.network.register_handler(MSG_TYPE.PLAYER_LEAVE, self.handle_player_leave)
+        self.network.register_handler(MSG_TYPE.ROUND_END, self.handle_round_end)
+        self.network.register_handler(MSG_TYPE.GAME_END, self.handle_game_end)
+        self.network.register_handler(MSG_TYPE.GUESS_CORRECT, self.handle_guess_correct)
+        self.network.register_handler(MSG_TYPE.ERROR, self.handle_error)
+    
+    # Network message handlers
+    def handle_register_ack(self, data):
+        self.player_id = data.get('player_id')
+        self.session_token = data.get('session_token')
+        self.username = data.get('username', self.username)
+        print(f"[Game] Registered as {self.username} (ID: {self.player_id})")
+    
+    def handle_room_created(self, data):
+        self.room_id = data.get('room_id')
+        self.room_code = data.get('room_code', '')
+        self.state = STATE_WAITING
+        self.status_message = f"Private room created! Code: {self.room_code}"
+        print(f"[Game] Created room {self.room_id} with code {self.room_code}")
+    
+    def handle_room_joined(self, data):
+        self.room_id = data.get('room_id')
+        self.room_code = data.get('room_code', '')
+        self.players = data.get('players', [])
+        self.state = STATE_WAITING
+        self.status_message = f"Joined room! Waiting for players..."
+        print(f"[Game] Joined room {self.room_id}")
+        print(f"[Game] Players in room: {self.players}")
+    
+    def handle_game_start(self, data):
+        self.state = STATE_PLAYING
+        self.round_number = data.get('round', 1)
+        self.total_rounds = data.get('total_rounds', 3)
+        self.word_mask = data.get('word_mask', '_ _ _ _')
+        self.players = data.get('players', [])
+        self.status_message = "Game started!"
+        self.canvas.clear()
+        self.countdown = 0
+        
+        # Check if this player is the drawer
+        drawer_id = data.get('drawer_id')
+        self.is_drawer = (drawer_id == self.player_id)
+        
+        # If drawer, might receive word in game start
+        if self.is_drawer and 'word' in data:
+            self.word_to_draw = data['word']
+            self.canvas.enabled = True
+        
+        print(f"[Game] Game started - Round {self.round_number}/{self.total_rounds}")
+    
+    def handle_round_start(self, data):
+        self.round_number = data.get('round', self.round_number)
+        self.total_rounds = data.get('total_rounds', self.total_rounds)
+        self.word_mask = data.get('word_mask', '_ _ _ _')
+        self.canvas.clear()
+        self.canvas.enabled = False
+        self.is_drawer = False
+        self.word_to_draw = ""
+        
+        drawer_id = data.get('drawer_id')
+        self.is_drawer = (drawer_id == self.player_id)
+        
+        # Check if word is included
+        if self.is_drawer and 'word' in data:
+            self.word_to_draw = data['word']
+            self.canvas.enabled = True
+        
+        print(f"[Game] Round {self.round_number} started")
+    
+    def handle_your_turn(self, data):
+        self.is_drawer = True
+        self.canvas.enabled = True
+        self.status_message = "Your turn to draw!"
+        print("[Game] Your turn to draw")
+    
+    def handle_word_to_draw(self, data):
+        self.word_to_draw = data.get('word', '')
+        self.canvas.enabled = True
+        self.status_message = f"Draw: {self.word_to_draw}"
+        print(f"[Game] Word to draw: {self.word_to_draw}")
+    
+    def handle_chat(self, data):
+        username = data.get('username', 'Unknown')
+        message = data.get('message', '')
+        chat_msg = f"{username}: {message}"
+        print(f"[Game] Chat received: {chat_msg}")
+        self.add_chat_message(chat_msg)
+    
+    def handle_draw_stroke(self, data):
+        # Draw stroke from other players
+        player_id = data.get('player_id')
+        
+        # Don't redraw own strokes
+        if player_id == self.player_id:
+            return
+        
+        x1 = data.get('x1', 0)
+        y1 = data.get('y1', 0)
+        x2 = data.get('x2', 0)
+        y2 = data.get('y2', 0)
+        color_idx = data.get('color', 0)
+        thickness = data.get('thickness', 3)
+        
+        self.canvas.draw_stroke(x1, y1, x2, y2, color_idx, thickness)
+    
+    def handle_clear_canvas(self, data):
+        self.canvas.clear()
+        self.add_chat_message("Canvas cleared", system=True)
+    
+    def handle_timer(self, data):
+        self.timer = data.get('time_remaining', 0)
+    
+    def handle_countdown(self, data):
+        self.countdown = data.get('countdown', 0)
+        if self.countdown > 0:
+            self.status_message = f"Game starting in {self.countdown}s..."
+    
+    def handle_player_join(self, data):
+        player = data.get('player')
+        if player:
+            self.players.append(player)
+            username = player.get('username', 'Unknown')
+            print(f"[Game] Player joined: {player}")
+            self.add_chat_message(f"{username} joined the room", system=True)
+    
+    def handle_player_leave(self, data):
+        player_id = data.get('player_id')
+        self.players = [p for p in self.players if p.get('player_id') != player_id]
+        username = data.get('username', 'Player')
+        self.add_chat_message(f"{username} left the room", system=True)
+    
+    def handle_round_end(self, data):
+        word = data.get('word', '')
+        self.players = data.get('players', self.players)
+        self.add_chat_message(f"Round ended! Word was: {word}", system=True)
+        self.word_to_draw = ""
+        self.canvas.enabled = False
+    
+    def handle_game_end(self, data):
+        self.state = STATE_ENDED
+        self.players = data.get('players', self.players)
+        # Sort by score
+        self.players.sort(key=lambda p: p.get('score', 0), reverse=True)
+        
+        winner = self.players[0] if self.players else None
+        if winner:
+            winner_name = winner.get('username', 'Unknown')
+            self.status_message = f"🏆 {winner_name} wins!"
+        else:
+            self.status_message = "Game ended!"
+        
+        self.canvas.enabled = False
+        print("[Game] Game ended")
+    
+    def handle_guess_correct(self, data):
+        player_id = data.get('player_id')
+        username = data.get('username', 'Player')
+        score = data.get('score', 0)
+        self.add_chat_message(f"🎉 {username} guessed correctly! (+{score} pts)", system=True)
+        
+        # Update player score
+        for player in self.players:
+            if player.get('player_id') == player_id:
+                player['score'] = player.get('score', 0) + score
+                break
+    
+    def handle_error(self, data):
+        error_msg = data.get('message', 'Unknown error')
+        self.status_message = f"Error: {error_msg}"
+        self.add_chat_message(f"Error: {error_msg}", system=True)
+    
+    def add_chat_message(self, message, system=False):
+        self.chat_messages.append({'message': message, 'system': system})
+        print(f"[Game] Chat added: {message} (total: {len(self.chat_messages)})")
+        if len(self.chat_messages) > 50:
+            self.chat_messages.pop(0)
+    
+    # User actions
+    def register_and_play_now(self):
+        """Web UI flow: Register → Join room_id=0 (auto matchmaking)"""
+        if not self.username_input.text.strip():
+            self.status_message = "Please enter your name!"
+            return
+        
+        self.username = self.username_input.text.strip()
+        
+        # Step 1: Register
+        self.network.send_tcp(MSG_TYPE.REGISTER, {'username': self.username})
+        
+        # Step 2: Join matchmaking (room_id=0 means auto matchmaking)
+        # Wait a bit for registration to complete
+        pygame.time.wait(100)
+        self.network.send_tcp(MSG_TYPE.JOIN_ROOM, {'room_id': 0})
+        
+        self.status_message = "Finding a game..."
+    
+    def register_and_create_room(self):
+        """Web UI flow: Register → Create private room"""
+        if not self.username_input.text.strip():
+            self.status_message = "Please enter your name!"
+            return
+        
+        self.username = self.username_input.text.strip()
+        
+        # Step 1: Register
+        self.network.send_tcp(MSG_TYPE.REGISTER, {'username': self.username})
+        
+        # Step 2: Create room
+        pygame.time.wait(100)
+        self.network.send_tcp(MSG_TYPE.CREATE_ROOM, {})
+        
+        self.status_message = "Creating private room..."
+    
+    def register_and_join_room(self):
+        """Web UI flow: Register → Join by room code"""
+        if not self.username_input.text.strip():
+            self.status_message = "Please enter your name!"
+            return
+        
+        room_code = self.room_code_input.text.strip().upper()
+        if len(room_code) != 6:
+            self.status_message = "Room code must be 6 characters!"
+            return
+        
+        self.username = self.username_input.text.strip()
+        
+        # Step 1: Register
+        self.network.send_tcp(MSG_TYPE.REGISTER, {'username': self.username})
+        
+        # Step 2: Join by code
+        pygame.time.wait(100)
+        self.network.send_tcp(MSG_TYPE.JOIN_ROOM, {'room_code': room_code})
+        
+        self.status_message = f"Joining room {room_code}..."
+    
+    def send_chat(self):
+        if self.chat_input and self.connected:
+            self.network.send_tcp(MSG_TYPE.CHAT, {'message': self.chat_input})
+            self.chat_input = ""
+    
+    def clear_canvas_action(self):
+        if self.is_drawer and self.canvas.enabled:
+            self.canvas.clear()
+            self.network.send_tcp(MSG_TYPE.UDP_CLEAR_CANVAS, {})
+    
+    def return_to_home(self):
+        """Return to landing page"""
+        self.state = STATE_LANDING
+        self.room_id = None
+        self.room_code = ""
+        self.players = []
+        self.chat_messages = []
+        self.is_drawer = False
+        self.word_to_draw = ""
+        self.word_mask = "_ _ _ _"
+        self.timer = 0
+        self.countdown = 0
+        self.round_number = 0
+        self.total_rounds = 0
+        self.canvas.clear()
+        self.canvas.enabled = False
+        self.chat_input = ""
+        self.status_message = "✓ Connected! Enter your name and choose an option"
+    
+    def handle_events(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            
+            # Landing screen events
+            if self.state == STATE_LANDING:
+                self.username_input.handle_event(event)
+                self.room_code_input.handle_event(event)
+                
+                if self.btn_play_now.handle_event(event) and self.connected:
+                    self.register_and_play_now()
+                elif self.btn_create_room.handle_event(event) and self.connected:
+                    self.register_and_create_room()
+                elif self.btn_join_room.handle_event(event) and self.connected:
+                    self.register_and_join_room()
+            
+            # Waiting/Playing screen events
+            elif self.state in [STATE_WAITING, STATE_PLAYING]:
+                # Canvas drawing
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.canvas.handle_mouse_down(event.pos)
+                    
+                    # Clear button
+                    if self.btn_clear.handle_event(event):
+                        self.clear_canvas_action()
+                    
+                    # Color palette
+                    self.handle_color_palette_click(event.pos)
+                
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.canvas.handle_mouse_up(event.pos)
+                
+                elif event.type == pygame.MOUSEMOTION:
+                    self.canvas.handle_mouse_move(event.pos, self.network)
+                    self.btn_clear.handle_event(event)
+                
+                # Chat input (allow chat in waiting room and for guessers during game)
+                elif event.type == pygame.KEYDOWN:
+                    if self.state == STATE_WAITING or (self.state == STATE_PLAYING and not self.is_drawer):
+                        if event.key == pygame.K_RETURN:
+                            self.send_chat()
+                        elif event.key == pygame.K_BACKSPACE:
+                            self.chat_input = self.chat_input[:-1]
+                        elif event.unicode.isprintable() and len(self.chat_input) < 50:
+                            self.chat_input += event.unicode
+            
+            # Game ended screen
+            elif self.state == STATE_ENDED:
+                if self.btn_return_home.handle_event(event):
+                    self.return_to_home()
+    
+    def handle_color_palette_click(self, pos):
+        # Color palette in drawing tools bar (if drawer)
+        if not self.is_drawer:
+            return
+        
+        canvas_x = SIDEBAR_WIDTH + 20
+        tools_y = 60
+        palette_x = canvas_x + 280
+        
+        for i in range(10):
+            color_x = palette_x + i * 35
+            color_y = tools_y + 5
+            if color_x < pos[0] < color_x + 25 and color_y < pos[1] < color_y + 25:
+                self.canvas.set_color(i)
+                break
+    
+    def render(self):
+        self.screen.fill(LIGHT_GRAY)
+        
+        if self.state == STATE_LANDING:
+            self.render_landing_screen()
+        elif self.state in [STATE_WAITING, STATE_PLAYING]:
+            self.render_game_screen()
+        elif self.state == STATE_ENDED:
+            self.render_game_end_screen()
+        
+        pygame.display.flip()
+    
+    def render_landing_screen(self):
+        """Landing page with username input and 3 options"""
+        # Title
+        title = self.font_large.render("🎨 Scribble", True, BLACK)
+        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 100))
+        self.screen.blit(title, title_rect)
+        
+        # Tagline
+        tagline = self.font_small.render("Draw, Guess, and Have Fun!", True, DARK_GRAY)
+        tagline_rect = tagline.get_rect(center=(WINDOW_WIDTH // 2, 150))
+        self.screen.blit(tagline, tagline_rect)
+        
+        # Connection status
+        status_color = GREEN if self.connected else RED
+        status = self.font_small.render(self.status_message, True, status_color)
+        status_rect = status.get_rect(center=(WINDOW_WIDTH // 2, 200))
+        self.screen.blit(status, status_rect)
+        
+        # Username input
+        self.username_input.draw(self.screen, self.font_small)
+        
+        # Buttons (only enabled if connected)
+        if self.connected:
+            self.btn_play_now.draw(self.screen, self.font_medium)
+            self.btn_create_room.draw(self.screen, self.font_medium)
+            
+            # Join room section
+            self.room_code_input.draw(self.screen, self.font_small)
+            self.btn_join_room.draw(self.screen, self.font_small)
+        else:
+            # Disabled buttons
+            pygame.draw.rect(self.screen, DARK_GRAY, self.btn_play_now.rect, border_radius=5)
+            pygame.draw.rect(self.screen, DARK_GRAY, self.btn_create_room.rect, border_radius=5)
+    
+    def render_game_screen(self):
+        """Game screen with canvas, players, chat - matches Web UI layout"""
+        # Left sidebar - Players
+        self.render_players_sidebar()
+        
+        # Center - Top bar (word, timer, round)
+        self.render_top_bar()
+        
+        # Drawing tools (only if drawer) - below word, above canvas
+        if self.is_drawer:
+            self.render_drawing_tools()
+        
+        # Canvas
+        self.canvas.render(self.screen)
+        
+        # Right sidebar - Chat
+        self.render_chat_sidebar()
+    
+    def render_top_bar(self):
+        """Status, word, timer - above canvas"""
+        canvas_x = SIDEBAR_WIDTH + 20
+        
+        # Word display (centered above canvas)
+        if self.word_to_draw:
+            # Drawer sees full word
+            word = self.font_medium.render(f"Draw: {self.word_to_draw}", True, BLUE)
+        else:
+            # Guessers see masked word
+            word = self.font_medium.render(self.word_mask, True, BLACK)
+        
+        word_rect = word.get_rect(center=(canvas_x + CANVAS_WIDTH // 2, 30))
+        self.screen.blit(word, word_rect)
+        
+        # Timer (top right of canvas area)
+        if self.timer > 0:
+            timer_color = RED if self.timer < 10 else BLACK
+            timer_text = self.font_medium.render(f"{self.timer}s", True, timer_color)
+            self.screen.blit(timer_text, (canvas_x + CANVAS_WIDTH - 80, 20))
+        
+        # Countdown (centered if active)
+        if self.countdown > 0:
+            countdown_text = self.font_large.render(f"Starting in {self.countdown}...", True, GREEN)
+            countdown_rect = countdown_text.get_rect(center=(canvas_x + CANVAS_WIDTH // 2, 30))
+            self.screen.blit(countdown_text, countdown_rect)
+        
+        # Round info (top left of canvas area)
+        if self.total_rounds > 0:
+            round_text = self.font_small.render(f"Round {self.round_number}/{self.total_rounds}", True, BLACK)
+            self.screen.blit(round_text, (canvas_x + 10, 20))
+    
+    def render_drawing_tools(self):
+        """Drawing tools section - below word, above canvas"""
+        canvas_x = SIDEBAR_WIDTH + 20
+        tools_y = 60
+        
+        # Background for tools section
+        pygame.draw.rect(self.screen, LIGHT_GRAY, (canvas_x, tools_y, CANVAS_WIDTH, 35))
+        
+        # Clear button
+        clear_btn_x = canvas_x + 10
+        pygame.draw.rect(self.screen, RED, (clear_btn_x, tools_y + 3, 120, 29), border_radius=5)
+        clear_text = self.font_small.render("Clear Canvas", True, WHITE)
+        self.screen.blit(clear_text, (clear_btn_x + 10, tools_y + 8))
+        
+        # Update clear button rect for click detection
+        self.btn_clear.rect = pygame.Rect(clear_btn_x, tools_y + 3, 120, 29)
+        
+        # Brush size label
+        brush_x = canvas_x + 150
+        brush_text = self.font_small.render(f"Brush: {self.canvas.line_width}px", True, BLACK)
+        self.screen.blit(brush_text, (brush_x, tools_y + 8))
+        
+        # Color palette
+        palette_x = canvas_x + 280
+        for i, color in enumerate(COLORS[:10]):
+            color_x = palette_x + i * 35
+            color_y = tools_y + 5
+            pygame.draw.rect(self.screen, color, (color_x, color_y, 25, 25))
+            
+            # Highlight selected color
+            if i == self.canvas.color_index:
+                pygame.draw.rect(self.screen, YELLOW, (color_x, color_y, 25, 25), 3)
+            else:
+                pygame.draw.rect(self.screen, GRAY, (color_x, color_y, 25, 25), 1)
+    
+    def render_sidebar(self):
+        """Right sidebar with players and drawing tools"""
+        sidebar_x = 850
+        y = 20
+        
+        # Room info
+        if self.room_code:
+            room_text = self.font_small.render(f"Room: {self.room_code}", True, BLACK)
+            self.screen.blit(room_text, (sidebar_x, y))
+            y += 30
+        
+        # Round info
+        if self.total_rounds > 0:
+            round_text = self.font_small.render(f"Round {self.round_number}/{self.total_rounds}", True, BLACK)
+            self.screen.blit(round_text, (sidebar_x, y))
+            y += 40
+        else:
+            y += 40
+        
+        # Color palette and drawing tools (only if drawer)
+        if self.is_drawer:
+            label = self.font_small.render("Drawing Tools:", True, BLACK)
+            self.screen.blit(label, (sidebar_x, y))
+            y += 30
+            
+            # Brush size
+            brush_label = self.font_small.render(f"Brush: {self.canvas.line_width}px", True, BLACK)
+            self.screen.blit(brush_label, (sidebar_x, y))
+            y += 30
+            
+            # Color palette
+            color_label = self.font_small.render("Colors:", True, BLACK)
+            self.screen.blit(color_label, (sidebar_x, y))
+            y += 25
+            
+            for i, color in enumerate(COLORS[:10]):
+                x = sidebar_x + (i % 5) * 50
+                color_y = y + (i // 5) * 50
+                pygame.draw.rect(self.screen, color, (x, color_y, 40, 40))
+                
+                # Highlight selected color
+                if i == self.canvas.color_index:
+                    pygame.draw.rect(self.screen, YELLOW, (x, color_y, 40, 40), 3)
+                else:
+                    pygame.draw.rect(self.screen, GRAY, (x, color_y, 40, 40), 2)
+            
+            y += 120
+        
+        # Players list
+        label = self.font_medium.render("Players", True, BLACK)
+        self.screen.blit(label, (sidebar_x, y))
+        y += 35
+        
+        if not self.players:
+            no_players = self.font_small.render("Waiting for players...", True, DARK_GRAY)
+            self.screen.blit(no_players, (sidebar_x, y))
+        else:
+            for player in self.players[:8]:
+                username = player.get('username', 'Player')
+                score = player.get('score', 0)
+                is_me = player.get('player_id') == self.player_id
+                is_drawing = player.get('is_drawing', False)
+                
+                # Highlight current player or drawer
+                if is_me:
+                    color = BLUE
+                    prefix = "→ "
+                elif is_drawing:
+                    color = GREEN
+                    prefix = "✏️ "
+                else:
+                    color = BLACK
+                    prefix = ""
+                
+                text = self.font_small.render(f"{prefix}{username}: {score} pts", True, color)
+                self.screen.blit(text, (sidebar_x, y))
+                y += 25
+    
+    def render_players_sidebar(self):
+        """Left sidebar - Players list with avatars (matches Web UI)"""
+        sidebar_x = 10
+        sidebar_y = 100
+        sidebar_width = SIDEBAR_WIDTH - 20
+        
+        # Background
+        pygame.draw.rect(self.screen, WHITE, (sidebar_x, sidebar_y, sidebar_width, CANVAS_HEIGHT))
+        pygame.draw.rect(self.screen, GRAY, (sidebar_x, sidebar_y, sidebar_width, CANVAS_HEIGHT), 2)
+        
+        # Title
+        title = self.font_medium.render("Players", True, BLACK)
+        self.screen.blit(title, (sidebar_x + 10, sidebar_y + 10))
+        
+        # Room info
+        y = sidebar_y + 45
+        if self.room_code:
+            room_text = self.font_small.render(f"Room: {self.room_code}", True, DARK_GRAY)
+            self.screen.blit(room_text, (sidebar_x + 10, y))
+            y += 25
+        
+        if self.total_rounds > 0:
+            round_text = self.font_small.render(f"Round {self.round_number}/{self.total_rounds}", True, DARK_GRAY)
+            self.screen.blit(round_text, (sidebar_x + 10, y))
+            y += 35
+        else:
+            y += 35
+        
+        # Players
+        if not self.players:
+            no_players = self.font_small.render("Waiting...", True, DARK_GRAY)
+            self.screen.blit(no_players, (sidebar_x + 10, y))
+        else:
+            for i, player in enumerate(self.players[:8]):
+                username = player.get('username', 'Player')
+                score = player.get('score', 0)
+                player_id = player.get('player_id', 0)
+                is_me = player_id == self.player_id
+                is_drawing = player.get('is_drawing', False)
+                online = player.get('online', True)
+                
+                # Avatar background
+                avatar_size = 40
+                avatar_x = sidebar_x + 10
+                avatar_y = y
+                
+                # Avatar color (pastel colors)
+                colors = [(255, 173, 173), (255, 214, 165), (253, 255, 182), 
+                         (202, 255, 191), (155, 246, 255), (189, 178, 255)]
+                bg_color = colors[player_id % len(colors)]
+                
+                pygame.draw.circle(self.screen, bg_color, 
+                                 (avatar_x + avatar_size//2, avatar_y + avatar_size//2), 
+                                 avatar_size//2)
+                
+                # Avatar letter (first letter of username)
+                initial = username[0].upper() if username else 'P'
+                initial_surface = self.font_medium.render(initial, True, BLACK)
+                initial_rect = initial_surface.get_rect(center=(avatar_x + avatar_size//2, avatar_y + avatar_size//2))
+                self.screen.blit(initial_surface, initial_rect)
+                
+                # Online indicator (green dot)
+                indicator_color = GREEN if online else RED
+                pygame.draw.circle(self.screen, indicator_color, 
+                                 (avatar_x + avatar_size - 5, avatar_y + avatar_size - 5), 5)
+                
+                # Drawing indicator (pencil icon substitute - yellow circle)
+                if is_drawing:
+                    pygame.draw.circle(self.screen, YELLOW, 
+                                     (avatar_x + 5, avatar_y + 5), 5)
+                
+                # Player info
+                info_x = avatar_x + avatar_size + 10
+                
+                # Username
+                name_color = BLUE if is_me else BLACK
+                name_text = self.font_small.render(username, True, name_color)
+                self.screen.blit(name_text, (info_x, avatar_y + 5))
+                
+                # Score (star substitute - diamond shape)
+                score_text = self.font_small.render(f"{score} pts", True, DARK_GRAY)
+                self.screen.blit(score_text, (info_x, avatar_y + 23))
+                
+                y += 50
+    
+    def render_chat_sidebar(self):
+        """Right sidebar - Chat box (matches Web UI)"""
+        chat_x = SIDEBAR_WIDTH + CANVAS_WIDTH + 40
+        chat_y = 100
+        chat_width = SIDEBAR_WIDTH - 20
+        chat_height = CANVAS_HEIGHT
+        
+        # Background
+        pygame.draw.rect(self.screen, WHITE, (chat_x, chat_y, chat_width, chat_height))
+        pygame.draw.rect(self.screen, GRAY, (chat_x, chat_y, chat_width, chat_height), 2)
+        
+        # Title
+        title = self.font_medium.render("Chat", True, BLACK)
+        self.screen.blit(title, (chat_x + 10, chat_y + 10))
+        
+        # Chat messages area starts below title
+        msg_start_y = chat_y + 45
+        msg_area_height = chat_height - 95  # Leave room for input at bottom
+        
+        # Draw separator line
+        pygame.draw.line(self.screen, GRAY, 
+                        (chat_x + 5, msg_start_y - 5), 
+                        (chat_x + chat_width - 5, msg_start_y - 5), 1)
+        
+        # Chat messages - render from bottom up
+        y_offset = msg_start_y + 5
+        messages_to_show = self.chat_messages[-20:] if len(self.chat_messages) > 20 else self.chat_messages
+        
+        print(f"[Render] Rendering {len(messages_to_show)} chat messages")
+        
+        for msg_data in messages_to_show:
+            if y_offset > msg_start_y + msg_area_height - 20:
+                break
+            
+            message = msg_data.get('message', '')
+            is_system = msg_data.get('system', False)
+            
+            # Truncate long messages
+            max_chars = 30
+            if len(message) > max_chars:
+                message = message[:max_chars] + "..."
+            
+            if is_system:
+                # System message (gray)
+                text = self.font_small.render(f"* {message}", True, DARK_GRAY)
+            else:
+                # Regular chat message
+                text = self.font_small.render(message, True, BLACK)
+            
+            self.screen.blit(text, (chat_x + 10, y_offset))
+            y_offset += 22
+        
+        # Chat input box at bottom
+        input_y = chat_y + chat_height - 45
+        
+        # Input background
+        pygame.draw.rect(self.screen, LIGHT_GRAY, (chat_x + 5, input_y, chat_width - 10, 35))
+        pygame.draw.rect(self.screen, GRAY, (chat_x + 5, input_y, chat_width - 10, 35), 2)
+        
+        # Input text or hint
+        if self.state == STATE_WAITING or (self.state == STATE_PLAYING and not self.is_drawer):
+            # Show input
+            if self.chat_input:
+                display_text = self.chat_input[:20]
+                text_color = BLACK
+            else:
+                display_text = "Type to chat..."
+                text_color = DARK_GRAY
+            
+            input_text = self.font_small.render(display_text, True, text_color)
+            self.screen.blit(input_text, (chat_x + 10, input_y + 10))
+            
+            # Cursor
+            if self.chat_input and len(self.chat_input) <= 20:
+                cursor_x = chat_x + 10 + self.font_small.size(self.chat_input)[0]
+                pygame.draw.line(self.screen, BLACK, 
+                               (cursor_x, input_y + 8), 
+                               (cursor_x, input_y + 27), 2)
+        else:
+            # Drawer hint
+            hint = self.font_small.render("(Drawing...)", True, DARK_GRAY)
+            self.screen.blit(hint, (chat_x + 10, input_y + 10))
+    
+    def render_game_end_screen(self):
+        """Game end screen with rankings"""
+        # Semi-transparent overlay
+        overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+        overlay.set_alpha(200)
+        overlay.fill(WHITE)
+        self.screen.blit(overlay, (0, 0))
+        
+        # Title
+        title = self.font_large.render("🏆 Game Ended!", True, BLACK)
+        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 150))
+        self.screen.blit(title, title_rect)
+        
+        # Rankings
+        y = 250
+        for i, player in enumerate(self.players[:5]):
+            username = player.get('username', 'Unknown')
+            score = player.get('score', 0)
+            
+            rank_text = f"#{i+1}  {username}  -  {score} pts"
+            if i == 0:
+                rank_text = f"👑 {rank_text}"
+            
+            color = [BLACK, DARK_GRAY, DARK_GRAY][min(i, 2)]
+            text = self.font_medium.render(rank_text, True, color)
+            text_rect = text.get_rect(center=(WINDOW_WIDTH // 2, y))
+            self.screen.blit(text, text_rect)
+            y += 50
+        
+        # Return button
+        self.btn_return_home.draw(self.screen, self.font_medium)
+    
+    def run(self):
+        while self.running:
+            # Handle input
+            self.handle_events()
+            
+            # Render
+            self.render()
+            
+            # Cap framerate
+            self.clock.tick(FPS)
+        
+        # Cleanup
+        self.network.disconnect()
+        pygame.quit()
+        sys.exit()
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Scribble Game Client')
+    parser.add_argument('--host', default='localhost', help='Server IP address (default: localhost)')
+    parser.add_argument('--tcp-port', type=int, default=9090, help='TCP port (default: 9090)')
+    parser.add_argument('--udp-port', type=int, default=9091, help='UDP port (default: 9091)')
+    args = parser.parse_args()
+    
+    game = ScribbleGame(host=args.host, tcp_port=args.tcp_port, udp_port=args.udp_port)
+    game.run()
