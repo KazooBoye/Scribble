@@ -241,14 +241,20 @@ class ScribbleGame:
             self.status_message = f"Failed to connect to {self.server_host}"
     
     def setup_network_handlers(self):
+        self.network.register_handler(MSG_TYPE.PING, self.handle_ping)
         self.network.register_handler(MSG_TYPE.REGISTER_ACK, self.handle_register_ack)
         self.network.register_handler(MSG_TYPE.ROOM_CREATED, self.handle_room_created)
         self.network.register_handler(MSG_TYPE.ROOM_JOINED, self.handle_room_joined)
+        self.network.register_handler(MSG_TYPE.ROOM_FULL, self.handle_room_full)
+        self.network.register_handler(MSG_TYPE.ROOM_NOT_FOUND, self.handle_room_not_found)
         self.network.register_handler(MSG_TYPE.GAME_START, self.handle_game_start)
         self.network.register_handler(MSG_TYPE.ROUND_START, self.handle_round_start)
         self.network.register_handler(MSG_TYPE.YOUR_TURN, self.handle_your_turn)
         self.network.register_handler(MSG_TYPE.WORD_TO_DRAW, self.handle_word_to_draw)
+        self.network.register_handler(MSG_TYPE.CHAT, self.handle_chat)  # Handle direct CHAT messages
         self.network.register_handler(MSG_TYPE.CHAT_BROADCAST, self.handle_chat)
+        self.network.register_handler(MSG_TYPE.GUESS_CORRECT, self.handle_guess_correct)
+        self.network.register_handler(MSG_TYPE.GUESS_WRONG, self.handle_guess_wrong)
         self.network.register_handler(MSG_TYPE.UDP_STROKE, self.handle_draw_stroke)
         self.network.register_handler(MSG_TYPE.UDP_CLEAR_CANVAS, self.handle_clear_canvas)
         self.network.register_handler(MSG_TYPE.TIMER_UPDATE, self.handle_timer)
@@ -257,10 +263,14 @@ class ScribbleGame:
         self.network.register_handler(MSG_TYPE.PLAYER_LEAVE, self.handle_player_leave)
         self.network.register_handler(MSG_TYPE.ROUND_END, self.handle_round_end)
         self.network.register_handler(MSG_TYPE.GAME_END, self.handle_game_end)
-        self.network.register_handler(MSG_TYPE.GUESS_CORRECT, self.handle_guess_correct)
+        self.network.register_handler(MSG_TYPE.SCORE_UPDATE, self.handle_score_update)
         self.network.register_handler(MSG_TYPE.ERROR, self.handle_error)
     
     # Message handlers
+    def handle_ping(self, data):
+        """Respond to server ping with pong"""
+        self.network.send_tcp(MSG_TYPE.PONG, {})
+    
     def handle_register_ack(self, data):
         self.player_id = data.get('player_id')
         self.session_token = data.get('session_token')
@@ -281,6 +291,20 @@ class ScribbleGame:
         self.state = STATE_WAITING
         self.status_message = "Waiting for players..."
         print(f"[Game] Joined room, {len(self.players)} players")
+    
+    def handle_room_full(self, data):
+        """Handle room full error"""
+        self.status_message = "Room is full!"
+        self.state = STATE_LANDING
+        self.chat_messages.append("* Room is full, try another one")
+        print("[Game] Room full")
+    
+    def handle_room_not_found(self, data):
+        """Handle room not found error"""
+        self.status_message = "Room not found!"
+        self.state = STATE_LANDING
+        self.chat_messages.append("* Room not found, check the code")
+        print("[Game] Room not found")
     
     def handle_game_start(self, data):
         self.state = STATE_PLAYING
@@ -390,6 +414,21 @@ class ScribbleGame:
         for player in self.players:
             if player.get('player_id') == player_id:
                 player['score'] = player.get('score', 0) + score
+                break
+    
+    def handle_guess_wrong(self, data):
+        """Handle incorrect guess - just log it"""
+        # Server broadcasts wrong guesses as chat, so nothing special to do
+        pass
+    
+    def handle_score_update(self, data):
+        """Handle score updates from server"""
+        player_id = data.get('player_id')
+        new_score = data.get('score', 0)
+        
+        for player in self.players:
+            if player.get('player_id') == player_id:
+                player['score'] = new_score
                 break
     
     def handle_error(self, data):

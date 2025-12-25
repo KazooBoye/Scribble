@@ -257,11 +257,22 @@ void handle_stroke(Player* player, const char* json) {
     printf("[TCP] STROKE: Raw JSON: %s\n", json);
     
     // Extract just the stroke data from {"type":100,"data":{stroke_data}}
+    // Handle both "data": and "data" : (with/without space)
     const char* data_start = strstr(json, "\"data\":");
+    if (!data_start) {
+        data_start = strstr(json, "\"data\" :");
+    }
+    
     if (data_start) {
-        data_start += 7; // Skip "data":
-        // Skip whitespace
-        while (*data_start == ' ') data_start++;
+        // Skip past "data": or "data" :
+        data_start = strchr(data_start, ':');
+        if (data_start) {
+            data_start++; // Skip the colon
+            // Skip whitespace
+            while (*data_start == ' ' || *data_start == '\t' || *data_start == '\n') {
+                data_start++;
+            }
+        }
         
         // The data_start now points to the stroke object {...}
         // We need to extract it and add player_id
