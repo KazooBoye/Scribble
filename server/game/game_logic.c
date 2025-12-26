@@ -58,6 +58,7 @@ void init_room(Room* room, uint32_t room_id, bool is_private) {
     memset(room, 0, sizeof(Room));
     room->room_id = room_id;
     room->is_private = is_private;
+    room->host_player_id = 0;  // Will be set when first player joins
     room->created_at = get_current_time_ms();
     room->state = ROOM_WAITING;
     room->current_drawer_idx = -1;
@@ -83,6 +84,13 @@ int add_player_to_room(Room* room, Player* player) {
     room->players[room->player_count] = player;
     room->player_count++;
     player->state = PLAYER_IN_ROOM;
+    
+    // First player becomes host
+    if (room->player_count == 1) {
+        room->host_player_id = player->player_id;
+        printf("[GAME] Player %u (%s) is now the host of room %u\n",
+               player->player_id, player->username, room->room_id);
+    }
     
     log_room_event(room->room_id, "player_joined", player->username);
     

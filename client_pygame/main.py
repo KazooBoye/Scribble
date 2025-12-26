@@ -197,6 +197,8 @@ class ScribbleGame:
         self.session_token = None
         self.room_id = None
         self.room_code = ""
+        self.is_host = False  # Track if player is room host
+        self.is_private_room = False  # Track if room is private
         self.players = []
         self.chat_messages = []
         self.is_drawer = False
@@ -207,6 +209,7 @@ class ScribbleGame:
         self.round_number = 0
         self.total_rounds = 0
         self.status_message = "Connecting..."
+        self.hovered_player_index = -1  # Track which player card is hovered
         
         # UI Components
         self.canvas = DrawingCanvas(CANVAS_X, CANVAS_Y, CANVAS_WIDTH, CANVAS_HEIGHT)
@@ -230,6 +233,9 @@ class ScribbleGame:
         
         # Clear button
         self.btn_clear = Button(CANVAS_X + CANVAS_WIDTH - 120, CANVAS_Y - 45, 110, 35, "Clear", RED, WHITE)
+        
+        # Host controls (for waiting room) - positioned in left sidebar
+        self.btn_start_game = Button(10, 500, SIDEBAR_WIDTH - 20, 45, "Start Game", GREEN)
         
         # Networking
         self.network = NetworkClient()
@@ -267,6 +273,7 @@ class ScribbleGame:
         self.network.register_handler(MSG_TYPE.SCORE_UPDATE, self.handle_score_update)
         self.network.register_handler(MSG_TYPE.RECONNECT_SUCCESS, self.handle_reconnect_success)
         self.network.register_handler(MSG_TYPE.RECONNECT_FAIL, self.handle_reconnect_fail)
+        self.network.register_handler(MSG_TYPE.DISCONNECT, self.handle_disconnect_msg)
         self.network.register_handler(MSG_TYPE.ERROR, self.handle_error)
     
     # Message handlers
@@ -284,13 +291,16 @@ class ScribbleGame:
     def handle_room_created(self, data):
         self.room_id = data.get('room_id')
         self.room_code = data.get('room_code', '')
+        self.is_host = True  # Player who creates room is the host
+        self.is_private_room = True
         self.state = STATE_WAITING
         self.status_message = f"Room created: {self.room_code}"
-        print(f"[Game] Created room {self.room_code}")
+        print(f"[Game] Created room {self.room_code} - You are the host")
     
     def handle_room_joined(self, data):
         self.room_id = data.get('room_id')
         self.room_code = data.get('room_code', '')
+        self.is_private_room = bool(self.room_code)  # Has room code = private
         self.players = data.get('players', [])
         self.state = STATE_WAITING
         self.status_message = "Waiting for players..."
@@ -480,6 +490,17 @@ class ScribbleGame:
         # Return to landing page
         self.state = STATE_LANDING
     
+    def handle_disconnect_msg(self, data):
+        """Handle disconnect message (kicked by host)"""
+        reason = data.get('reason', 'Disconnected')
+        print(f"[Game] Disconnected: {reason}")
+        self.status_message = f"You were kicked from the room"
+        self.chat_messages.append(f"* {reason}")
+        
+        # Return to landing page after short delay
+        self.state = STATE_ENDED  # Use ended state to show message with button
+        self.players = []  # Clear players so we show kick message instead
+    
     # User actions
     def register_and_play_now(self):
         if not self.username_input.text.strip():
@@ -532,12 +553,40 @@ class ScribbleGame:
     def return_to_home(self):
         self.state = STATE_LANDING
         self.room_id = None
+        self.is_host = False
+        self.is_private_room = False
         self.players = []
         self.chat_messages = []
         self.canvas.clear()
         self.canvas.enabled = False
         self.chat_input = ""
         self.status_message = "Connected!"
+    
+    def start_game_early(self):
+        """Host starts game early (if enough players)"""
+        if self.is_host and len(self.players) >= 2:
+            # Send message to server to start game
+            self.network.send_tcp(MSG_TYPE.HOST_START_GAME, {})
+            print("[Game] Host requested early game start")
+    
+    def kick_player(self, player_id):
+        """Host kicks a player from the room"""
+        if self.is_host and player_id != self.player_id:
+            self.network.send_tcp(MSG_TYPE.HOST_KICK_PLAYER, {'player_id': player_id})
+            print(f"[Game] Host kicked player {player_id}")
+    
+    def update_hovered_player(self, mouse_pos):
+        """Update which player card is being hovered"""
+        x = 10
+        y = 80
+        w = SIDEBAR_WIDTH - 20
+        
+        self.hovered_player_index = -1
+        for i, player in enumerate(self.players[:10]):
+            player_rect = pygame.Rect(x, y + i * 45, w, 40)
+            if player_rect.collidepoint(mouse_pos):
+                self.hovered_player_index = i
+                break
     
     def handle_events(self):
         for event in pygame.event.get():
@@ -557,6 +606,17 @@ class ScribbleGame:
             
             elif self.state in [STATE_WAITING, STATE_PLAYING]:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    # Check for kick icon clicks in WAITING state
+                    if self.state == STATE_WAITING and self.is_host and self.hovered_player_index >= 0:
+                        player = self.players[self.hovered_player_index]
+                        if player.get('player_id') != self.player_id:
+                            self.kick_player(player.get('player_id'))
+                    
+                    # Start game button (only in WAITING state for host)
+                    if self.state == STATE_WAITING and self.is_host:
+                        if self.btn_start_game.handle_event(event):
+                            self.start_game_early()
+                    
                     self.canvas.handle_mouse_down(event.pos)
                     
                     if self.is_drawer and self.btn_clear.handle_event(event):
@@ -572,6 +632,10 @@ class ScribbleGame:
                     self.canvas.handle_mouse_up(event.pos)
                 
                 elif event.type == pygame.MOUSEMOTION:
+                    # Track hovered player for kick icon
+                    if self.state == STATE_WAITING and self.is_host:
+                        self.update_hovered_player(event.pos)
+                    
                     self.canvas.handle_mouse_move(event.pos, self.network)
                     if self.is_drawer:
                         self.btn_clear.handle_event(event)
@@ -590,7 +654,14 @@ class ScribbleGame:
                     self.return_to_home()
     
     def render(self):
-        self.screen.fill(BG_COLOR)
+        # Use wood background if available, otherwise solid color
+        bg_wood = self.resources.get('bg_wood')
+        if bg_wood:
+            # Scale to fill screen
+            bg_scaled = pygame.transform.scale(bg_wood, (WINDOW_WIDTH, WINDOW_HEIGHT))
+            self.screen.blit(bg_scaled, (0, 0))
+        else:
+            self.screen.fill(BG_COLOR)
         
         if self.state == STATE_LANDING:
             self.render_landing()
@@ -686,7 +757,7 @@ class ScribbleGame:
         self.screen.blit(title, (x, 20))
         
         # Players list
-        for player in self.players[:10]:
+        for i, player in enumerate(self.players[:10]):
             username = player.get('username', 'Player')
             score = player.get('score', 0)
             player_id = player.get('player_id', 0)
@@ -721,7 +792,40 @@ class ScribbleGame:
             score_surf = self.font_small.render(f"{score} pts", True, DARK_GRAY)
             self.screen.blit(score_surf, (x + 40, y + 24))
             
+            # Kick icon (only in WAITING state, for host, on hover, not for self)
+            if (self.state == STATE_WAITING and self.is_host and 
+                i == self.hovered_player_index and not is_me):
+                kick_icon = self.resources.get('icon_kick')
+                if kick_icon:
+                    # Scale icon if needed
+                    icon_size = (20, 20)
+                    if kick_icon.get_size() != icon_size:
+                        kick_icon = pygame.transform.scale(kick_icon, icon_size)
+                    # Position at right side of player card
+                    icon_x = x + w - 25
+                    icon_y = y + 10
+                    self.screen.blit(kick_icon, (icon_x, icon_y))
+            
             y += 45
+        
+        # Start Game button (only for host in WAITING state with private room)
+        if self.state == STATE_WAITING and self.is_host and self.is_private_room:
+            # Position button below players list
+            button_y = min(y + 20, WINDOW_HEIGHT - 100)
+            self.btn_start_game.rect.y = button_y
+            
+            # Grey out if not enough players
+            if len(self.players) < 2:
+                # Draw disabled version
+                disabled_color = DARK_GRAY
+                pygame.draw.rect(self.screen, disabled_color, self.btn_start_game.rect, border_radius=5)
+                pygame.draw.rect(self.screen, GRAY, self.btn_start_game.rect, 2, border_radius=5)
+                text = self.font_medium.render("Need 2+ Players", True, WHITE)
+                text_rect = text.get_rect(center=self.btn_start_game.rect.center)
+                self.screen.blit(text, text_rect)
+            else:
+                # Draw enabled button
+                self.btn_start_game.draw(self.screen, self.font_medium)
     
     def render_drawing_tools(self):
         y = CANVAS_Y - 45
@@ -798,11 +902,22 @@ class ScribbleGame:
         self.screen.blit(overlay, (0, 0))
         
         # Title
-        title = self.font_large.render("Game Ended!", True, BLACK)
-        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 150))
-        self.screen.blit(title, title_rect)
+        if len(self.players) == 0:
+            # Kicked message
+            title = self.font_large.render("Kicked from Room", True, RED)
+            title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 150))
+            self.screen.blit(title, title_rect)
+            
+            msg = self.font_medium.render("You were removed by the host", True, BLACK)
+            msg_rect = msg.get_rect(center=(WINDOW_WIDTH // 2, 250))
+            self.screen.blit(msg, msg_rect)
+        else:
+            # Normal game end
+            title = self.font_large.render("Game Ended!", True, BLACK)
+            title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 150))
+            self.screen.blit(title, title_rect)
         
-        # Rankings
+        # Rankings (only if we have players)
         y = 250
         for i, player in enumerate(self.players[:5]):
             username = player.get('username', 'Player')

@@ -36,6 +36,10 @@ class MSG_TYPE:
     ERROR = 28
     DISCONNECT = 29
     
+    # Host control messages (30+)
+    HOST_START_GAME = 30
+    HOST_KICK_PLAYER = 31
+    
     # UDP Messages
     UDP_STROKE = 100
     UDP_CLEAR_CANVAS = 101

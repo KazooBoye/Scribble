@@ -5,6 +5,12 @@
 **Môn học:** Lập trình mạng (Network Programming)  
 **Người thực hiện:** Cao Duc Anh
 
+**Cập nhật gần đây:**
+- ✅ Persistent Player Statistics (CSV storage)
+- ✅ Reconnection System (session tokens, 5min state preservation)
+- ✅ Host Controls (early game start, kick players for private rooms)
+- ✅ Resource Manager (programmatic fallback icon generation)
+
 ---
 
 ## 📋 MỤC LỤC
@@ -16,9 +22,8 @@
 5. [Các thành phần chính](#5-các-thành-phần-chính)
 6. [Protocol và Message Flow](#6-protocol-và-message-flow)
 7. [Tính năng đã hoàn thành](#7-tính-năng-đã-hoàn-thành)
-8. [Tính năng chưa hoàn thành](#8-tính-năng-chưa-hoàn-thành)
-9. [Vấn đề và Giải pháp](#9-vấn-đề-và-giải-pháp)
-10. [Kết luận](#10-kết-luận)
+8. [Kết luận](#8-kết-luận)
+9. [Phụ lục](#phụ-lục)
 
 ---
 
@@ -35,19 +40,7 @@ Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, đ�
 - Xử lý reconnection và persistence
 - Tạo UI trực quan với Pygame rendering
 
-### Server**: C11, POSIX threads, Berkeley sockets
-- **Client**: Python 3.x, Pygame, ctypes
-- **Networking Library**: C (compiled to .dylib/.so)
-- **Protocol**: TCP with 4-byte length prefix
-- **Data Format**: JSON
-- **Cross-platform**: macOS, Linux
-- **Cross-platform**: macOS, Linux/WSL
-
----
-
-## 2. KIẾN TRÚC HỆ THỐNG
-
-### 2.1. Sơ đồ tổng quan
+### 1.3. Công nghệ sử dụng
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -76,7 +69,12 @@ Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, đ�
 │  - Select()     │  - Scoring   │  - Private   │  - Round    │
 │  - Broadcast    │  - Drawing   │    rooms     │    timer    │
 │  - JSON msg     │    state     │  - Join code │  - Updates  │
-└─────────────────┴──────────────┴──────────────┴─────────────┘
+├─────────────────┴──────────────┴──────────────┴─────────────┤
+│  Stats System   │  Reconnection │  Host Controls             │
+│  - CSV storage  │  - Sessions   │  - Early start             │
+│  - Thread-safe  │  - 5min cache │  - Kick players            │
+│  - Leaderboard  │  - Auto retry │  - Permission check        │
+└─────────────────┴───────────────┴────────────────────────────┘
 ```
 
 ### 2.2. Luồng dữ liệu
@@ -234,13 +232,14 @@ server/
 │
 ├── tcp/                           # TCP Server cho game logic
 │   ├── tcp_server.c/.h           # TCP socket management với select()
-│   ├── tcp_handler.c/.h          # Message handlers (30+ types)
+│   ├── tcp_handler.c/.h          # Message handlers (32 types)
 │   └── tcp_parser.c/.h           # JSON message parsing
 │
 ├── game/                          # Game Logic
 │   ├── game_logic.c/.h           # Core game mechanics
 │   ├── matchmaking.c/.h          # Room management
-│   └── reconnection.c/.h         # Reconnection handling
+│   ├── reconnection.c/.h         # Reconnection handling
+│   └── stats.c/.h                # Player statistics persistence
 │
 └── utils/                         # Utilities
     ├── logger.c/.h               # JSON logging
@@ -280,7 +279,8 @@ client_pygame/
 │   └── receive()                 # Non-blocking receive
 │
 ├── protocol.py                    # Message types và constants
-│   ├── MSG_TYPE enum             # 30 TCP message types
+│   ├── MSG_TYPE enum             # 32 message types (0-31)
+│   ├── Drawing types             # STROKE (100), CLEAR (101)
 │   ├── COLORS palette            # 10 drawing colors
 │   └── Helper functions          # Color conversion
 │
@@ -322,6 +322,11 @@ typedef struct {
     char session_token[64];    // For reconnection
     char recv_buffer[4096];    // Partial message buffer
     int recv_buffer_len;
+    
+    // Stats tracking
+    uint32_t correct_guesses_this_game;
+    uint32_t rounds_drawn_this_game;
+    uint64_t round_start_time;
 } Player;
 ```
 
@@ -356,6 +361,7 @@ typedef struct {
     char room_code[16];              // 6-char code for private rooms
     Player* players[MAX_PLAYERS];    // Array of player pointers
     int player_count;
+    uint32_t host_player_id;         // Host for private rooms (kick/start)
     RoomState state;                 // WAITING, PLAYING, ENDED
     int current_drawer_idx;
     char current_word[MAX_WORD_LEN];
@@ -455,7 +461,96 @@ void iterate_active_rooms(void (*callback)(Room*));
   // - Call callback for each active room
 ```
 
-#### 5.1.5. Timer Thread (`utils/timer.c`)
+#### 5.1.5. Stats System (`game/stats.c`)
+**Vai trò:** Player statistics tracking và CSV persistence
+
+**Chức năng:**
+- CSV file storage trong `player_stats.txt`
+- Thread-safe operations với pthread_mutex
+- Load stats on player register
+- Update stats on game end
+- Track fastest guess times
+
+**Key Data Structures:**
+```c
+typedef struct {
+    char username[32];
+    uint32_t games_played;
+    uint32_t games_won;
+    uint64_t total_score;
+    uint32_t total_correct_guesses;
+    uint32_t total_rounds_drawn;
+    uint64_t fastest_guess_ms;
+    uint64_t last_played;
+} PlayerStats;
+```
+
+**Key Functions:**
+```c
+int load_player_stats(const char* username, PlayerStats* stats);
+  // - Read from CSV file
+  // - Parse player stats
+  // - Return 0 if found, -1 if new player
+
+int save_player_stats(const PlayerStats* stats);
+  // - Atomic write with temp file
+  // - Thread-safe with mutex
+  // - Update or append stats
+
+void update_game_stats(Player* player, bool won);
+  // - Increment games_played
+  // - Increment games_won if won
+  // - Add to total_score
+  // - Update last_played timestamp
+
+void update_fastest_guess(Player* player, uint64_t guess_time_ms);
+  // - Compare with current fastest
+  // - Update if faster
+```
+
+#### 5.1.6. Reconnection System (`game/reconnection.c`)
+**Vai trò:** Session management và state restoration
+
+**Chức năng:**
+- Generate unique session tokens
+- Cache player state for 5 minutes
+- Validate reconnection requests
+- Restore player to room
+
+**Key Data Structures:**
+```c
+typedef struct {
+    char session_token[64];
+    uint32_t player_id;
+    uint32_t room_id;
+    uint64_t disconnect_time;
+    PlayerState saved_state;
+} SessionData;
+```
+
+**Key Functions:**
+```c
+void generate_session_token(char* token, uint32_t player_id);
+  // - Create unique token with timestamp
+  // - Format: playerid-timestamp-random
+
+void save_player_session(Player* player);
+  // - Store player state
+  // - Save room_id, score, state
+  // - Set disconnect timestamp
+
+int restore_player_session(const char* token, Player* player);
+  // - Validate token
+  // - Check 5-minute timeout
+  // - Restore player state
+  // - Re-add to room
+
+void cleanup_expired_sessions();
+  // - Remove sessions > 5 minutes old
+  // - Called periodically by timer
+```
+
+#### 5.1.7. Timer Thread (`utils/timer.c`)
 **Vai trò:** 1-second tick timer cho game updates
 
 **Chức năng:**
@@ -587,7 +682,9 @@ typedef enum {
     MSG_RECONNECT_SUCCESS = 26,
     MSG_RECONNECT_FAIL = 27,
     MSG_ERROR = 28,
-    MSG_DISCONNECT = 29
+    MSG_DISCONNECT = 29,
+    MSG_HOST_START_GAME = 30,
+    MSG_HOST_KICK_PLAYER = 31
 } MessageType;
 
 // Drawing Messages (also via TCP, historical naming)
@@ -597,6 +694,46 @@ typedef enum {
     UDP_UNDO = 102           // Undo last stroke (not implemented)
 } UDPMessageType;  // Note: Naming is historical, actually sent via TCP
 ```
+
+**Message Reference Table:**
+
+| ID  | Name                 | Direction      | Purpose                                       |
+|-----|----------------------|----------------|-----------------------------------------------|
+| 0   | PING                 | Server→Client  | Keep-alive check                              |
+| 1   | PONG                 | Client→Server  | Keep-alive response                           |
+| 2   | REGISTER             | Client→Server  | Player registration with username             |
+| 3   | REGISTER_ACK         | Server→Client  | Registration confirmation (player_id, token)  |
+| 4   | JOIN_ROOM            | Client→Server  | Join room (auto or by code)                   |
+| 5   | CREATE_ROOM          | Client→Server  | Create private room                           |
+| 6   | ROOM_CREATED         | Server→Client  | Private room created with code                |
+| 7   | ROOM_JOINED          | Server→Client  | Successfully joined room                      |
+| 8   | ROOM_FULL            | Server→Client  | Room is full error                            |
+| 9   | ROOM_NOT_FOUND       | Server→Client  | Invalid room code error                       |
+| 10  | GAME_START           | Server→Client  | Game begins (round 1)                         |
+| 11  | YOUR_TURN            | Server→Client  | You are now the drawer                        |
+| 12  | WORD_TO_DRAW         | Server→Client  | Word for drawer only                          |
+| 13  | ROUND_START          | Server→Client  | New round begins                              |
+| 14  | CHAT                 | Client→Server  | Chat message or guess                         |
+| 15  | CHAT_BROADCAST       | Server→Client  | Broadcast chat to room                        |
+| 16  | GUESS_CORRECT        | Server→Client  | Player guessed correctly                      |
+| 17  | GUESS_WRONG          | Server→Client  | Incorrect guess (deprecated, uses chat)       |
+| 18  | TIMER_UPDATE         | Server→Client  | Round timer countdown                         |
+| 19  | COUNTDOWN_UPDATE     | Server→Client  | Game start countdown (15s)                    |
+| 20  | ROUND_END            | Server→Client  | Round finished, show word                     |
+| 21  | GAME_END             | Server→Client  | Game finished, final scores                   |
+| 22  | PLAYER_JOIN          | Server→Client  | New player joined room                        |
+| 23  | PLAYER_LEAVE         | Server→Client  | Player left room                              |
+| 24  | SCORE_UPDATE         | Server→Client  | Player score changed                          |
+| 25  | RECONNECT_REQUEST    | Client→Server  | Reconnect with session token                  |
+| 26  | RECONNECT_SUCCESS    | Server→Client  | Reconnection successful, state restored       |
+| 27  | RECONNECT_FAIL       | Server→Client  | Reconnection failed (invalid token)           |
+| 28  | ERROR                | Server→Client  | General error message                         |
+| 29  | DISCONNECT           | Server→Client  | Server-initiated disconnect (kick)            |
+| 30  | HOST_START_GAME      | Client→Server  | Host requests early game start                |
+| 31  | HOST_KICK_PLAYER     | Client→Server  | Host kicks player from room                   |
+| 100 | UDP_STROKE           | Client↔Server  | Drawing stroke data (via TCP)                 |
+| 101 | UDP_CLEAR_CANVAS     | Client→Server  | Clear canvas command (via TCP)                |
+| 102 | UDP_UNDO             | Client→Server  | Undo stroke (not implemented)                 |
 
 ### 6.2. Message Format
 
@@ -727,6 +864,43 @@ Server → All Players (via TCP)
 }}
 ```
 
+**9. Host Controls (Private Rooms Only):**
+
+*Early Game Start:*
+```
+Host → Server (via TCP)
+{"type": 30, "data": {}}
+
+Server validates:
+- Player is host (player_id == room->host_player_id)
+- Room has 2+ players
+- Room in WAITING state
+
+Server → All Players (via TCP)
+{"type": 10, "data": {"round": 1, ...}}  // Game starts immediately
+```
+
+*Kick Player:*
+```
+Host → Server (via TCP)
+{"type": 31, "data": {"player_id": 456}}
+
+Server validates:
+- Sender is host
+- Target player exists in room
+- Cannot kick self
+
+Server → Kicked Player (via TCP)
+{"type": 29, "data": {"reason": "Kicked by host"}}
+
+Server → Other Players (via TCP)
+{"type": 23, "data": {
+    "player_id": 456,
+    "username": "Bob",
+    "reason": "kicked"
+}}
+```
+
 ---
 
 ## 7. TÍNH NĂNG ĐÃ HOÀN THÀNH
@@ -826,7 +1000,7 @@ Server → All Players (via TCP)
 - [x] **Stroke logging:** Drawing actions
 
 ### 7.11. Persistent Player Stats ✅
-- [x] **Stats file system:** CSV format in `server/data/player_stats.txt`
+- [x] **Stats file system:** CSV format in `player_stats.txt`
 - [x] **Tracked metrics:**
   - Games played and won
   - Total score accumulated
@@ -836,8 +1010,20 @@ Server → All Players (via TCP)
   - Last played timestamp
 - [x] **Auto save:** Stats updated after each game ends
 - [x] **Load on register:** Player stats loaded when connecting
-- [x] **Thread-safe:** Mutex-protected file operations
+- [x] **Thread-safe:** Mutex-protected file operations with pthread_mutex
 - [x] **Leaderboard support:** Get top N players by total score
+- [x] **CSV format:**
+  ```
+  username,games_played,games_won,total_score,correct_guesses,rounds_drawn,fastest_guess_ms,last_played
+  Alice,10,3,8500,45,10,1250,1735200000000
+  Bob,8,2,6200,38,8,1580,1735199800000
+  ```
+- [x] **Integration:**
+  - `load_player_stats()` called on MSG_REGISTER
+  - `update_game_stats()` called on MSG_GAME_END
+  - `update_fastest_guess()` called on MSG_GUESS_CORRECT
+  - Stats added to Player struct: `correct_guesses_this_game`, `rounds_drawn_this_game`, `round_start_time`
+- [x] **Atomic updates:** Temp file + rename for crash safety
 
 ### 7.12. Reconnection System ✅
 - [x] **Session tokens:** Generated on player register
@@ -855,789 +1041,58 @@ Server → All Players (via TCP)
   - Auto-retry with exponential backoff
   - UI feedback for reconnection status
 
----
-
-## 8. TÍNH NĂNG CHƯA HOÀN THÀNH
-
-### 8.1. Matchmaking by Latency ⚠️
-**Mô tả ban đầu:** Ghép người chơi có ping tương tự nhau để đảm bảo fair play
-
-**Trạng thái:**
-- ❌ Chưa implement RTT measurement
-- ❌ Chưa có ping-based matching algorithm
-- ✅ Có basic auto matchmaking (first available room)
-
-**Lý do chưa hoàn thành:**
-- Focus vào core gameplay trước
-- Cần thêm ping measurement mechanism
-- Với số lượng player test nhỏ, latency không critical
-
-**TODO để hoàn thành:**
-```c
-// 1. Add ping measurement
-void measure_player_rtt(Player* player) {
-    send_tcp_message(player->fd, MSG_PING, "{}");
-    uint64_t start = get_current_time_ms();
-    // Wait for MSG_PONG
-    uint64_t end = get_current_time_ms();
-    player->rtt = end - start;
-}
-
-// 2. Modify matchmaking
-Room* find_best_room_by_latency(Player* player) {
-    Room* best = NULL;
-    uint64_t min_rtt_diff = UINT64_MAX;
-    
-    for (int i = 0; i < MAX_ROOMS; i++) {
-        if (rooms[i].state == ROOM_WAITING) {
-            uint64_t avg_rtt = calculate_average_rtt(&rooms[i]);
-            uint64_t diff = abs(avg_rtt - player->rtt);
-            if (diff < min_rtt_diff) {
-                min_rtt_diff = diff;
-                best = &rooms[i];
-            }
-        }
-    }
-    return best;
-}
-```
-
-### 8.2. Full Reconnection System ⚠️
-**Mô tả ban đầu:** Player có thể reconnect và tiếp tục game từ đúng điểm đã disconnect
-
-**Trạng thái:**
-- ✅ Session token generation
-- ✅ Player state preservation (5 phút)
-- ❌ Canvas state restore chưa hoàn chỉnh
-- ❌ Client-side reconnection UI chưa polish
-
-**Vấn đề:**
-- Canvas strokes không được lưu persistent
-- Client cần redraw toàn bộ canvas sau reconnect
-- Reconnection dialog hiển thị nhưng UX chưa tốt
-
-**TODO để hoàn thành:**
-```c
-// Server-side: Save strokes
-typedef struct {
-    uint32_t player_id;
-    Stroke strokes[MAX_STROKES];
-    int stroke_count;
-    // ... other state
-} SavedPlayerState;
-
-void save_player_state(Player* player, Room* room) {
-    SavedPlayerState* state = malloc(sizeof(SavedPlayerState));
-    state->player_id = player->player_id;
-    state->stroke_count = room->stroke_count;
-    memcpy(state->strokes, room->strokes, 
-           sizeof(Stroke) * room->stroke_count);
-    // Save to hash map with session_token as key
-}
-
-void restore_player_state(Player* player, SavedPlayerState* state) {
-    // Send all strokes to player
-    for (int i = 0; i < state->stroke_count; i++) {
-        send_tcp_message(player->fd, UDP_STROKE, 
-                        serialize_stroke(&state->strokes[i]));
-    }
-}
-```
-
-```javascript
-// Client-side: Better reconnection UX
-async handleReconnect() {
-    const token = localStorage.getItem('session_token');
-    if (!token) return;
-    
-    try {
-        await this.ws.connect('ws://localhost:8081');
-        this.ws.send(MSG_TYPE.RECONNECT_REQUEST, { token });
-        
-        // Show loading dialog
-        this.showReconnectDialog('Restoring game state...');
-    } catch (error) {
-        this.showReconnectDialog('Reconnection failed. Starting new session.');
-        localStorage.removeItem('session_token');
-    }
-}
-```
-
-### 8.3. Private Room Password Protection ❌
-**Mô tả ban đầu:** Private rooms có thể có password để tăng security
-
-**Trạng thái:**
-- ❌ Chưa implement
-- ✅ Private rooms hoạt động với 6-char code
-
-**Lý do chưa hoàn thành:**
-- 6-char random code đã đủ secure cho use case thông thường
-- Password thêm friction vào UX
-- Priority thấp hơn core features
-
-**TODO để hoàn thành:**
-```c
-// Add to Room struct
-typedef struct {
-    // ... existing fields
-    char password[64];      // SHA256 hash of password
-    bool has_password;
-} Room;
-
-// Hash password
-void hash_password(const char* plain, char* hash_out) {
-    // Use SHA256
-}
-
-// Verify password
-bool verify_password(Room* room, const char* plain) {
-    char hash[64];
-    hash_password(plain, hash);
-    return strcmp(room->password, hash) == 0;
-}
-```
-
-### 8.4. Spectator Mode ❌
-**Mô tả:** Cho phép người khác xem game đang chơi mà không tham gia
-
-**Trạng thái:**
-- ❌ Chưa implement
-
-**Lý do chưa hoàn thành:**
-- Cần separate spectator state
-- Complicate matchmaking logic
-- Priority thấp
-
-### 8.5. Undo Drawing ❌
-**Mô tả:** Drawer có thể undo stroke cuối cùng
-
-**Trạng thái:**
-- ✅ Message type `UDP_UNDO` đã define
-- ❌ Logic chưa implement
-
-**Lý do chưa hoàn thành:**
-- Clear canvas đã đủ cho basic use case
-- Cần track stroke history phức tạp
-
-**TODO để hoàn thành:**
-```javascript
-// Client
-class DrawingCanvas {
-    constructor() {
-        this.strokeHistory = [];
-    }
-    
-    undo() {
-        if (this.strokeHistory.length > 0) {
-            this.strokeHistory.pop();
-            this.redraw();
-            this.ws.send(UDP_TYPE.UNDO, {});
-        }
-    }
-    
-    redraw() {
-        this.clear();
-        for (const stroke of this.strokeHistory) {
-            this.drawStroke(stroke);
-        }
-    }
-}
-```
-
-### 8.6. Advanced Scoring System ❌
-**Mô tả ban đầu:** Điểm thưởng cho drawer khi nhiều người đoán đúng
-
-**Trạng thái:**
-- ✅ Basic scoring: Guesser nhận điểm dựa trên thời gian
-- ❌ Drawer không nhận điểm
-
-**TODO để hoàn thành:**
-```c
-int process_guess(Room* room, Player* player, const char* guess) {
-    // ... existing guess logic
-    
-    if (correct) {
-        // Award points to guesser
-        player->score += points;
-        
-        // Award points to drawer
-        Player* drawer = room->players[room->current_drawer_idx];
-        drawer->score += 5;  // Fixed points per correct guess
-        
-        // Broadcast both score updates
-    }
-}
-```
-
-### 8.7. Hint System ❌
-**Mô tả:** Show hints sau một khoảng thời gian (ví dụ: reveal 1 chữ cái)
-
-**Trạng thái:**
-- ❌ Chưa implement
-
-**TODO để hoàn thành:**
-```c
-void update_timer(Room* room) {
-    // ... existing timer logic
-    
-    // Reveal hint at 60s, 30s remaining
-    if (room->time_remaining == 60 || room->time_remaining == 30) {
-        reveal_hint(room);
-    }
-}
-
-void reveal_hint(Room* room) {
-    // Find a hidden letter to reveal
-    char word_mask[MAX_WORD_LEN];
-    create_word_mask_with_hint(room->current_word, word_mask, 
-                                room->time_remaining);
-    
-    // Broadcast updated mask
-    char msg[256];
-    snprintf(msg, sizeof(msg), "{\"word_mask\":\"%s\"}", word_mask);
-    broadcast_to_room(room, MSG_HINT_UPDATE, msg, NULL);
-}
-```
-
----
-
-## 9. VẤN ĐỀ VÀ GIẢI PHÁP
-
-### 9.1. Migration từ Web UI sang Pygame Client ✅ COMPLETED
-
-**Context ban đầu:**
-- Server có HTTP server + WebSocket proxy + UDP server
-- Client là Web UI với HTML/CSS/JavaScript
-- Architecture phức tạp: Browser → WebSocket → Proxy → TCP/UDP → Server
-
-**Vấn đề:**
-1. **WebSocket proxy** thêm complexity không cần thiết
-2. **HTTP server** chỉ serve static files
-3. **Web Canvas API** có limitations về performance
-4. **Browser limitations:** Không thể dùng UDP trực tiếp
-5. **4-thread proxy** overkill cho simple game
-
-**Giải pháp:**
-- Migrate toàn bộ sang Pygame client với direct TCP connection
-- Loại bỏ HTTP server, WebSocket proxy
-- Client library trong C compiled thành shared library
-- Python ctypes bridge cho Pygame
-
-**Kết quả:**
-✅ Architecture đơn giản hơn rất nhiều
-✅ Direct TCP connection, không cần proxy
-✅ Native performance với Pygame rendering
-✅ Code maintainability tốt hơn
-✅ Easier deployment (không cần web server)
-
-### 9.2. UDP Implementation và Complete Reversion ✅ COMPLETED
-
-#### Timeline của UDP Feature
-
-**Phase 1: Initial UDP Implementation (Dec 2024)**
-**Mô tả:** Implement UDP protocol để broadcast drawing strokes cho performance
-
-**Implementation:**
-- Server có UDP server thread tại port 9091
-- Binary protocol: 41-byte packets
-  ```c
-  struct UDPStroke {
-      uint8_t type;           // 1 byte: message type
-      uint32_t room_id;       // 4 bytes: room identifier
-      uint32_t stroke_id;     // 4 bytes: stroke sequence
-      float x1, y1, x2, y2;   // 16 bytes: coordinates
-      uint32_t color;         // 4 bytes: color value
-      uint32_t thickness;     // 4 bytes: brush size
-      uint64_t timestamp;     // 8 bytes: timing
-  };  // Total: 41 bytes
-  ```
-- Client gửi strokes qua UDP socket
-- Server nhận và broadcast via UDP
-
-**Problems Encountered:**
-1. **Player identification issue:** UDP packets không có connection state, phải lookup player bằng IP address
-2. **Hybrid broadcast:** Nhận UDP nhưng phải broadcast lại qua TCP vì client logic
-3. **Complexity explosion:** Maintain cả TCP và UDP sockets, sync state giữa 2 protocols
-4. **Observer không thấy canvas:** UDP-to-TCP conversion có bugs
-5. **Binary packing overhead:** Client phải pack/unpack binary structs
-
-**Phase 2: UDP-to-TCP Hybrid (mid-Dec 2024)**
-**Attempt:** Keep UDP receive nhưng broadcast via TCP
-
-**Implementation:**
-```c
-// Server nhận UDP packet
-void handle_udp_packet(const char* packet, struct sockaddr_in* client_addr) {
-    // Deserialize binary packet
-    Stroke stroke = deserialize_udp_stroke(packet);
-    
-    // Find player by IP address
-    Player* player = find_player_by_ip(client_addr->sin_addr.s_addr);
-    
-    // Broadcast via TCP to room members
-    broadcast_to_room(player->room, UDP_STROKE, serialize_json(stroke), player);
-}
-```
-
-**Still problematic:**
-- IP-based player lookup unreliable (NAT, proxies)
-- UDP packets có thể arrive out-of-order
-- Error handling phức tạp
-- Debugging nightmare
-
-**Phase 3: Complete Reversion to TCP (late Dec 2024)** ✅
-
-**Decision:** Abandon UDP hoàn toàn, chuyển strokes về TCP với JSON
-
-**Rationale:**
-1. **Simplicity > Performance:** TCP overhead không đáng kể cho game này
-2. **Reliability:** TCP đảm bảo delivery và ordering
-3. **Single protocol:** Easier to debug và maintain
-4. **JSON consistency:** Không cần binary packing/unpacking
-
-**Implementation Steps:**
-1. ✅ Removed UDP server initialization từ `server/main.c`
-2. ✅ Updated `tcp/tcp_handler.c` để handle stroke messages (type 100)
-3. ✅ Removed UDP socket từ `client_c/network.c`
-4. ✅ Removed `network_send_udp()` function
-5. ✅ Updated Python client để gửi strokes via TCP
-6. ✅ Changed `send_udp()` → `send_tcp()` calls
-7. ✅ Removed binary packing code (80+ lines)
-8. ✅ Updated Makefile để không compile UDP sources
-9. ✅ Moved UDP files to `deprecated/udp/`
-
-**Code Changes:**
-```python
-# Before (Binary UDP):
-def _pack_udp_stroke(self, stroke_id, x1, y1, x2, y2, color, thickness):
-    return struct.pack(
-        '!BIIffffIIQ',  # 41 bytes
-        100, self.room_id, stroke_id,
-        x1, y1, x2, y2,
-        color, thickness, int(time.time() * 1000)
-    )
-
-# After (JSON TCP):
-def send_stroke(self, x1, y1, x2, y2, color, thickness):
-    self.send_tcp(MSG_TYPE.STROKE, {
-        "x1": x1, "y1": y1,
-        "x2": x2, "y2": y2,
-        "color": color,
-        "thickness": thickness
-    })
-```
-
-**Results:**
-✅ **Simplified architecture:** TCP-only communication
-✅ **Working canvas sync:** Observer nhìn thấy drawing real-time
-✅ **Maintainable code:** JSON messages dễ debug
-✅ **No performance issues:** TCP đủ nhanh cho use case này
-✅ **Code reduction:** Removed 200+ lines of UDP code
-
-**Lessons Learned:**
-1. **KISS principle:** Keep It Simple, Stupid - đừng over-engineer
-2. **Premature optimization:** UDP "cho performance" nhưng không cần thiết
-3. **Complexity cost:** Hybrid protocols tốn effort maintain hơn performance gain
-4. **Debug difficulty:** Binary protocols khó debug hơn JSON nhiều
-5. **TCP is good enough:** Cho real-time game scale nhỏ, TCP performance OK
-
-**Historical Note:**
-Message types 100-102 vẫn giữ prefix `UDP_` trong code (ví dụ `UDP_STROKE`) vì lý do historical. Chúng thực tế được transmitted qua TCP.
-
-### 9.3. Race Condition Issues
-
-#### 9.3.1. Timer Thread Race Condition ⚠️
-**Vấn đề:**
-- Timer thread và TCP handler thread cùng access room state
-- Không có mutex protection
-- Có thể xảy ra:
-  - Timer update trong lúc processing guess
-  - Round end trigger trong lúc broadcasting stroke
-  - Corrupted room state
-
-**Ví dụ:**
-```c
-// Thread 1 (Timer)
-void update_timer(Room* room) {
-    room->time_remaining--;  // ← Race here
-    if (room->time_remaining <= 0) {
-        end_round(room);     // ← Modifies room state
-    }
-}
-
-// Thread 2 (TCP Handler)
-int process_guess(Room* room, ...) {
-    if (room->time_remaining > 0) {  // ← Race here
-        // ... process guess
-        room->players[i]->score += points;  // ← Modifies player state
-    }
-}
-```
-
-**Giải pháp đã implement:**
-- Sử dụng `pthread_mutex_lock/unlock` trong matchmaking
-- Tuy nhiên **chưa protect toàn bộ room operations**
-
-**Giải pháp hoàn chỉnh cần:**
-```c
-// Add mutex to Room struct
-typedef struct {
-    // ... existing fields
-    pthread_mutex_t room_mutex;
-} Room;
-
-// Protect all room operations
-void update_timer(Room* room) {
-    pthread_mutex_lock(&room->room_mutex);
-    room->time_remaining--;
-    if (room->time_remaining <= 0) {
-        end_round(room);
-    }
-    pthread_mutex_unlock(&room->room_mutex);
-}
-
-int process_guess(Room* room, ...) {
-    pthread_mutex_lock(&room->room_mutex);
-    // ... safe access
-    pthread_mutex_unlock(&room->room_mutex);
-}
-```
-
-#### 9.3.2. Message Ordering Race ✅ FIXED
-**Vấn đề ban đầu:**
-- MSG_WORD_TO_DRAW có thể arrive sau MSG_ROUND_START
-- Drawer không thấy từ cần vẽ
-
-**Giải pháp:**
-- Thêm word vào game start/round start data
-- Client check 3 nơi để nhận word:
-  1. `handleGameStart(data)` - if `data.word` exists
-  2. `handleRoundStart(data)` - if `data.word` exists
-  3. `handleWordToDraw(data)` - dedicated message
-- Fallback mechanism đảm bảo drawer luôn nhận được word
-
-### 9.4. Canvas Synchronization Issues
-
-#### 9.4.1. Other Players Cannot See Drawing ✅ FIXED
-**Vấn đề ban đầu:**
-- Drawer vẽ nhưng người khác không thấy
-- Root cause: Stroke data được wrap 2 lần
-
-**Chi tiết:**
-```javascript
-// Client gửi:
-{
-    "type": 100,
-    "data": {
-        "x1": 100, "y1": 150,
-        "color": 16711680  // Hex color as int
-    }
-}
-
-// Server wrap lại:
-{
-    "type": 100,
-    "data": {
-        "data": {  // ← Nested "data"
-            "x1": 100, "y1": 150,
-            "color": 16711680
-        }
-    }
-}
-
-// Client parse: stroke.data.data.x1 → undefined
-```
-
-**Giải pháp:**
-- Fix server broadcast để không wrap data 2 lần
-- Sử dụng color palette index (0-9) thay vì hex color
-- Test kỹ message format
-
-#### 9.4.2. Color Not Synchronized ✅ FIXED
-**Vấn đề:**
-- Drawer dùng màu khác black, người khác không thấy màu đó
-- Root cause: Hex color → int conversion sai
-
-**Giải pháp:**
-- Implement 10-color palette với fixed indices:
-  ```javascript
-  colors = [
-      '#000000', // 0: Black
-      '#FF0000', // 1: Red
-      '#00FF00', // 2: Green
-      // ... 7 more colors
-  ]
-  ```
-- Gửi color index thay vì color value
-- Đơn giản hóa protocol và đảm bảo consistency
-
-#### 9.4.3. Canvas Blank After Round 2 ✅ FIXED
-**Vấn đề ban đầu:**
-- Round 1 OK, từ round 2 trở đi canvas trắng
-- Root cause: Clear canvas không được broadcast đúng
-
-**Giải pháp:**
-- Clear canvas khi `handleRoundStart()`
-- Clear strokes array trên server: `room->stroke_count = 0`
-- Broadcast clear command đến tất cả players
-
-### 9.5. Network Issues
-
-#### 9.5.1. Remote Server Connection ✅ FIXED
-**Vấn đề:**
-- Pygame client kết nối đến server remote (192.168.1.2)
-- Bị firewall block connections
-- Connection timeout
-
-**Root cause:**
-- Firewall trên server machine block incoming TCP connections
-- Port 9090 không được mở
-
-**Giải pháp:**
-```bash
-# Open firewall port on server
-sudo ufw allow 9090/tcp
-
-# Or disable firewall for testing
-sudo ufw disable
-```
-
-**Testing:**
-```bash
-# From client machine
-telnet 192.168.1.2 9090
-
-# If successful, connection works
-```
-
-**Result:** ✅ Client có thể connect từ LAN machines khác
-
-#### 9.5.2. JSON Parsing Issues ✅ FIXED
-**Vấn đề:**
-- Server C code parse JSON không handle whitespace sau colon
-- Python `json.dumps()` tạo `"key": value` (có space)
-- Server expect `"key":value` (không space)
-- Parse failed
-
-**Example:**
-```python
-# Python generates:
-{"type": 2, "data": {"username": "Alice"}}
-       ↑        ↑                  ↑  spaces!
-
-# Server expected:
-{"type":2,"data":{"username":"Alice"}}
-```
-
-**Giải pháp:**
-Update `server/utils/json.c` để skip whitespace:
-```c
-const char* json_get_string(const char* json, const char* key, char* out) {
-    char* ptr = strstr(json, key);
-    if (!ptr) return NULL;
-    
-    ptr += strlen(key);
-    while (*ptr == ':' || *ptr == ' ' || *ptr == '\t') ptr++;  // Skip whitespace
-    // ... rest of parsing
-}
-```
-
-**Result:** ✅ Server parse JSON từ Python client correctly
-**Vấn đề:**
-- macOS dùng CommonCrypto, Linux dùng OpenSSL
-- Byte order functions khác nhau (htobe64)
-
-**Giải pháp:**
-- Tạo `server/utils/endian_compat.h`:
-  ```c
-  #ifdef __APPLE__
-      #define htobe64(x) OSSwapHostToBigInt64(x)
-  #elif defined(__linux__)
-      #include <endian.h>
-  #endif
-  ```
-- Makefile detect OS và link proper libraries
-- Crypto macros cho SHA1
-
-### 9.6. Game Logic Issues
-
-#### 9.6.1. Fixed 5-Player Rounds ✅ FIXED
-**Vấn đề ban đầu:**
-- Game luôn expect 5 players, 5 rounds
-- Với 2-3 players, logic không work
-
-**Giải pháp:**
-- Dynamic `total_rounds = player_count`
-- Track `has_drawn` cho mỗi player
-- Skip players đã vẽ hoặc disconnect
-- Recalculate rounds khi player leaves
-
-```c
-void start_game(Room* room) {
-    room->total_rounds = room->player_count;  // Dynamic
-}
-
-void start_next_round(Room* room) {
-    // Find next player who hasn't drawn
-    do {
-        room->current_drawer_idx = 
-            (room->current_drawer_idx + 1) % room->player_count;
-    } while (room->players[room->current_drawer_idx]->has_drawn);
-    
-    room->players[room->current_drawer_idx]->has_drawn = true;
-}
-
-int remove_player_from_room(Room* room, Player* player) {
-    // Recalculate total rounds
-    int remaining = 0;
-    for (int i = 0; i < room->player_count; i++) {
-        if (!room->players[i]->has_drawn) remaining++;
-    }
-    room->total_rounds = room->round_number + remaining;
-}
-```
-
-#### 9.6.2. Guesser Not Seeing Correct Notification ✅ FIXED
-**Vấn đề:**
-- Player đoán đúng nhưng không thấy green notification
-- Other players thấy nhưng guesser không thấy
-
-**Root cause:**
-- Race condition giữa MSG_GUESS_CORRECT và MSG_CHAT_BROADCAST
-- Client có thể miss message
-
-**Giải pháp:**
-- Thêm logging để debug
-- Thêm special status message cho guesser:
-  ```javascript
-  if (data.player_id === this.playerId) {
-      this.showStatus('Correct! 🎉', 'success');
-  }
-  ```
-- Đảm bảo notification luôn hiển thị
-
-#### 9.6.3. Round Count UI Not Updating ✅ FIXED
-**Vấn đề:**
-- UI hardcoded "Round: X/5"
-- Không reflect dynamic total_rounds
-
-**Giải pháp:**
-- Server gửi `total_rounds` trong JSON
-- HTML: `<span id="total-rounds">0</span>`
-- JavaScript update cả hai:
-  ```javascript
-  document.getElementById('round-number').textContent = data.round;
-  document.getElementById('total-rounds').textContent = data.total_rounds;
-  ```
-
-### 9.7. Memory Management Issues
-
-#### 9.7.1. Memory Leaks ⚠️
-**Potential issues chưa fully test:**
-- JSON strings allocated với `malloc()` có thể leak
-- Player disconnect không cleanup hết state
-- Stroke array có thể overflow với long games
-
-**Best practices cần áp dụng:**
-```c
-// Always free allocated JSON
-char* json = json_create_room_state(room);
-broadcast_to_room(room, MSG_TYPE, json, NULL);
-free(json);  // ← Important!
-
-// Cleanup on player disconnect
-void cleanup_player(Player* player) {
-    if (player->recv_buffer) {
-        // Clear buffer
-        memset(player->recv_buffer, 0, BUFFER_SIZE);
-    }
-    // Reset all fields
-    memset(player, 0, sizeof(Player));
-}
-
-// Limit stroke array
-void add_stroke(Room* room, const Stroke* stroke) {
-    if (room->stroke_count >= MAX_STROKES) {
-        // Either reject or overwrite oldest
-        return;
-    }
-    room->strokes[room->stroke_count++] = *stroke;
-}
-```
-
-#### 9.7.2. Buffer Overflows ⚠️
-**Potential issues:**
-- Username không check length trước copy
-- Chat messages có thể vượt MAX_CHAT_LEN
-- Room code có thể malformed
-
-**Safe practices:**
-```c
-// Safe string copy
-void set_username(Player* player, const char* username) {
-    strncpy(player->username, username, MAX_USERNAME - 1);
-    player->username[MAX_USERNAME - 1] = '\0';  // Ensure null-term
-}
-
-// Validate input
-bool validate_room_code(const char* code) {
-    if (strlen(code) != 6) return false;
-    for (int i = 0; i < 6; i++) {
-        if (!isalnum(code[i])) return false;
-    }
-    return true;
-}
-```
-
-### 9.8. Performance Issues
-
-#### 9.8.1. Broadcasting Overhead ⚠️
-**Issue:**
-- Mỗi stroke broadcast riêng lẻ
-- Với fast drawing, có thể gửi 100+ strokes/second
-
-**Potential optimization:**
-```c
-// Batch strokes
-typedef struct {
-    Stroke strokes[BATCH_SIZE];
-    int count;
-    uint64_t last_send;
-} StrokeBatch;
-
-void add_stroke_to_batch(StrokeBatch* batch, const Stroke* stroke) {
-    batch->strokes[batch->count++] = *stroke;
-    
-    uint64_t now = get_current_time_ms();
-    if (batch->count >= BATCH_SIZE || 
-        now - batch->last_send > 16) {  // 60fps
-        flush_stroke_batch(batch);
-    }
-}
-```
-
-#### 9.8.2. JSON Parsing ⚠️
-**Issue:**
-- Custom JSON parsing với string operations
-- Không efficient cho large messages
-
-**Better approach:**
-- Sử dụng library như cJSON hoặc jansson
-- Binary protocol cho performance-critical messages (strokes)
-
----
-
-## 10. KẾT LUẬN
-
-### 10.1. Thành tựu đạt được
+### 7.13. Host Controls for Private Rooms ✅
+- [x] **Host assignment:** First player to create/join room becomes host
+- [x] **Early game start:**
+  - Host can start game with 2+ players (bypass 15s countdown)
+  - "Start Game" button visible only to host in waiting state
+  - Button greyed out when <2 players
+  - Server validates host permission and player count
+- [x] **Kick player:**
+  - Hover over player card shows kick icon (red X)
+  - Only host can see kick icons (not on self)
+  - Click to remove player from room
+  - Kicked player receives disconnect message with reason
+  - Kicked player shown "Kicked from Room" screen with return button
+  - Server validates host permission
+- [x] **Message types:**
+  - MSG_HOST_START_GAME (30): Host requests early start
+  - MSG_HOST_KICK_PLAYER (31): Host removes player
+- [x] **Permission system:**
+  - Room struct tracks host_player_id
+  - Server validates all host actions
+  - Prevents self-kick and unauthorized actions
+
+### 7.14. Resource Management ✅
+- [x] **Programmatic icon generation:**
+  - Send icon (paper plane shape)
+  - Kick icon (red circle with white X)
+  - Drawing icon (pencil shape)
+  - Clear icon (eraser/trash)
+- [x] **Optional resource loading:**
+  - Background textures (bg_wood) - used in main UI
+  - Logo images - graceful fallback if missing
+- [x] **Fallback system:**
+  - Creates icons if files not found
+  - Pygame surface generation with basic shapes
+  - No critical failures from missing assets
+
+
+
+
+
+
+## 8. KẾT LUẬN
+
+### 8.1. Thành tựu đạt được
 
 Dự án Scribble đã hoàn thành các mục tiêu chính:
 
 ✅ **Architecture Design**
-- Multi-threaded C server với HTTP, TCP, UDP
-- 4-thread client proxy bridge
-- WebSocket integration cho browser clients
+- Multi-threaded C server với TCP protocol
+- Pygame client với C networking library
 - Clean separation of concerns
+- CSV-based persistence layer
 
 ✅ **Core Gameplay**
 - Turn-based drawing và guessing
@@ -1645,35 +1100,45 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 - Dynamic rounds (2-5 players)
 - Scoring system với time-based points
 - Auto matchmaking và private rooms
+- Host controls (early start, kick players)
 
 ✅ **Network Programming**
 - Per-client TCP connections
 - Message broadcasting với proper routing
 - Cross-platform compatibility (macOS, Linux, WSL)
-- WebSocket protocol implementation
 - JSON message format
+- Session-based reconnection system
 
 ✅ **User Experience**
-- Modern responsive web UI
+- Pygame native UI với hardware acceleration
 - 10-color palette với visual feedback
 - Real-time timer và countdown
-- Game end rankings với crown icon
-- Smooth drawing với touch support
+- Game end rankings với winner display
+- Smooth drawing với proper stroke rendering
+- Resource fallback system
 
-### 10.2. Kỹ năng học được
+✅ **Data Persistence**
+- Player statistics tracking (CSV)
+- Session tokens for reconnection
+- Thread-safe file operations
+- Atomic updates for data integrity
+
+### 8.2. Kỹ năng học được
 
 **Network Programming:**
-- Berkeley sockets (TCP, UDP)
+- Berkeley sockets (TCP)
 - Multi-threading với pthreads
 - Thread synchronization (mutex, condition variables)
-- WebSocket protocol
 - Message serialization/deserialization
+- Session management
+- Reconnection strategies
 
 **System Design:**
 - Client-server architecture
-- Message queue design
 - State management
 - Thread-safe data structures
+- CSV-based persistence
+- Host permission system
 
 **C Programming:**
 - Memory management
@@ -1682,13 +1147,15 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 - Build systems (Makefile)
 - Shared library compilation
 - ctypes integration
+- File I/O with atomic operations
 
 **Python Programming:**
 - Pygame framework
 - Event-driven programming
 - ctypes FFI (Foreign Function Interface)
 - JSON serialization
-- Non-blocking I/O
+- Resource management
+- Callback patterns
 
 **Game Development:**
 - Game loop design (60 FPS)
@@ -1696,16 +1163,17 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 - Real-time rendering
 - Input handling
 - UI component design
+- Canvas drawing systems
 
-### 10.3. Hạn chế và cải tiến
+### 8.3. Hạn chế và cải tiến
 
 **Hạn chế hiện tại:**
 1. Chưa có latency-based matchmaking
-2. Reconnection system chưa hoàn chỉnh (canvas restore)
-3. Thiếu mutex protection ở một số race conditions
+2. Canvas state không được restore sau reconnect
+3. Stats UI chưa được hiển thị trong game
 4. Memory leaks potential chưa fully test
 5. Performance chưa optimize cho scale lớn
-6. Pygame client single-threaded (blocking receive)
+6. Host transfer khi host leaves chưa được implement
 
 **Hướng phát triển:**
 1. **Architecture:**
@@ -1727,14 +1195,18 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
    - Secure session tokens
 
 4. **Features:**
+   - Canvas state preservation for reconnection
+   - In-game stats display
+   - Player profiles with stats history
+   - Global leaderboards (top scores, fastest guesses)
+   - Host transfer on host disconnect
    - Spectator mode
    - Undo drawing
    - Hint system
    - Advanced scoring (drawer points)
-   - Player profiles
-   - Leaderboards
    - Custom word lists
    - Drawing time limit options
+   - Room settings (rounds, timer, difficulty)
 
 5. **Performance:**
    - Stroke batching
@@ -1751,67 +1223,29 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
    - Monitoring (Prometheus)
    - Logging aggregation
 
-### 10.4. Tổng kết
-
-Scribble project đã successfully implement một multiplayer game hoàn chỉnh với:
-- **2000+ lines** of C code (server + networking library)
-- **800+ lines** of Python code (Pygame client)
-- **2 concurrent threads** (TCP server + Timer)
-- **1 network protocol** (TCP với JSON, simplified từ TCP/UDP/WebSocket)
-- **30+ message types** cho game communication
-- **10+ features** hoàn chỉnh
-
-**Major Architectural Decisions:**
-1. ✅ **Migration từ Web UI sang Pygame:** Simplified deployment, better performance
-2. ✅ **Complete UDP reversion:** TCP-only approach, KISS principle
-3. ✅ **C networking library:** Reusable, cross-platform, efficient
-4. ✅ **ctypes integration:** Clean Python-C bridge
-5. ✅ **JSON protocol:** Simple, debuggable, maintainable
-
-**Technical Achievements:**
-- Low-level socket programming (Berkeley sockets)
-- Multi-threaded server với select() multiplexing
-- Cross-platform shared library compilation
-- Foreign Function Interface (ctypes)
-- Real-time game synchronization
-- State machine implementation
-- Event-driven architecture
-
-**Lessons Learned:**
-1. **Simplicity wins:** TCP-only đơn giản hơn và đủ tốt
-2. **Premature optimization is evil:** UDP không cần thiết cho use case này
-3. **Debug-ability matters:** JSON > Binary cho development
-4. **Architecture evolution:** OK để pivot khi design không work
-5. **Testing is crucial:** Real-world testing exposed many issues
-
-Project demonstrate understanding của:
-- Low-level network programming
-- Concurrent programming
-- System architecture design
-- Real-time synchronization
-- Cross-platform development
-- Game development fundamentals
-
-Đây là foundation tốt để phát triển thành production-ready game server với proper testing, security, và scalability. Codebase hiện tại clean, maintainable, và ready cho future enhancements.
-
----
 
 ## PHỤ LỤC
 
 ### A. Cấu trúc File quan trọng
 
-**server/protocol.h** - Core data structures và message types
-**server/game/game_logic.c** - Game mechanics
-**server/tcp/tcp_handler.c** - Message handlers
-**server/tcp/tcp_server.c** - TCP server với select()
-**client_c/network.c** - C networking library
-**client_pygame/main.py** - Pygame game client
-**client_pygame/network_wrapper.py** - ctypes wrapper
-**client_pygame/protocol.py** - Message type definitions
+**server/protocol.h** - Core data structures và message types  
+**server/game/game_logic.c** - Game mechanics  
+**server/game/stats.c/.h** - Player statistics system  
+**server/game/reconnection.c/.h** - Reconnection system  
+**server/tcp/tcp_handler.c** - Message handlers  
+**server/tcp/tcp_server.c** - TCP server với select()  
+**client_c/network.c** - C networking library  
+**client_pygame/main.py** - Pygame game client  
+**client_pygame/network_wrapper.py** - ctypes wrapper  
+**client_pygame/protocol.py** - Message type definitions  
+**client_pygame/resources.py** - Resource manager with fallback icons  
+**player_stats.txt** - CSV persistence file for player statistics
 
-### B. Message Flow Diagrams
+### B. Data Files
 
-Xem Section 6.3 cho chi tiết Complete Game Flow
+**words.txt** - Word dictionary (2000+ words)  
+**player_stats.txt** - Player statistics (CSV format)  
+**logs/events.log** - Game events logging (JSON format)
 
 ### C. Build và Run
 
@@ -1834,25 +1268,8 @@ python3 client_pygame/main.py --host 192.168.1.2 --port 9090
 Ctrl+C hoặc make stop
 ```
 
-### D. Testing Checklist
 
-- [ ] 2 players can join và play
-- [ ] 5 players full room
-- [ ] Drawing syncs correctly via TCP
-- [ ] All 10 colors work
-- [ ] Brush size changes work
-- [ ] Guessing awards points correctly
-- [ ] Timer counts down properly
-- [ ] Game ends with rankings
-- [ ] Private room works with code
-- [ ] Player disconnect handled gracefully
-- [ ] Reconnection restores state (partial)
-- [ ] Remote connection works (LAN)
-- [ ] Clear canvas works
-- [ ] Chat messages appear
-- [ ] Drawing tools show/hide per turn
-
-### E. Deprecated Components
+### D. Deprecated Components
 
 **deprecated/udp/** - UDP implementation files (removed Dec 2024)
 - `udp_server.c/.h` - UDP server (41-byte binary protocol)

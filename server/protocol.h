@@ -53,7 +53,9 @@ typedef enum {
     MSG_RECONNECT_SUCCESS,
     MSG_RECONNECT_FAIL,
     MSG_ERROR,
-    MSG_DISCONNECT
+    MSG_DISCONNECT,
+    MSG_HOST_START_GAME,
+    MSG_HOST_KICK_PLAYER
 } MessageType;
 
 // UDP Message Types
@@ -118,6 +120,7 @@ typedef struct {
     char room_code[16];
     Player* players[MAX_PLAYERS];
     int player_count;
+    uint32_t host_player_id;         // ID of the room host (creator)
     RoomState state;
     int current_drawer_idx;
     char current_word[MAX_WORD_LEN];
