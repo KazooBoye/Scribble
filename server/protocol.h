@@ -103,6 +103,10 @@ typedef struct {
     bool is_drawing;
     bool has_guessed;
     bool has_drawn;  // Track if player has had their turn to draw
+    // Game session tracking (for stats)
+    int correct_guesses_this_game;
+    int rounds_drawn_this_game;
+    uint64_t round_start_time;  // For tracking guess speed
     // TCP receive buffer for handling partial messages
     char recv_buffer[BUFFER_SIZE];
     int recv_buffer_len;

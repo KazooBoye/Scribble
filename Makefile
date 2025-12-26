@@ -30,11 +30,10 @@ SERVER_SRCS = \
 	$(SERVER_DIR)/tcp/tcp_server.c \
 	$(SERVER_DIR)/tcp/tcp_handler.c \
 	$(SERVER_DIR)/tcp/tcp_parser.c \
-	$(SERVER_DIR)/udp/udp_server.c \
-	$(SERVER_DIR)/udp/udp_broadcast.c \
 	$(SERVER_DIR)/game/game_logic.c \
 	$(SERVER_DIR)/game/matchmaking.c \
 	$(SERVER_DIR)/game/reconnection.c \
+	$(SERVER_DIR)/game/stats.c \
 	$(SERVER_DIR)/utils/logger.c \
 	$(SERVER_DIR)/utils/json.c \
 	$(SERVER_DIR)/utils/timer.c
@@ -62,9 +61,7 @@ all: setup server client install
 
 # Setup build directories
 setup:
-	@mkdir -p $(BUILD_DIR)/server/http
 	@mkdir -p $(BUILD_DIR)/server/tcp
-	@mkdir -p $(BUILD_DIR)/server/udp
 	@mkdir -p $(BUILD_DIR)/server/game
 	@mkdir -p $(BUILD_DIR)/server/utils
 	@echo "[SETUP] Build directories created"
@@ -116,7 +113,6 @@ run: all
 	@echo ""
 	@echo "✓ Server running on:"
 	@echo "  - TCP:  localhost:9090"
-	@echo "  - UDP:  localhost:9091"
 	@echo ""
 	@echo "✓ To start client: make run-client"
 	@echo "  Or run: python3 client_pygame/main.py"

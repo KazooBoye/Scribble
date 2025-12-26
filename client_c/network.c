@@ -17,9 +17,7 @@
 
 // Global state
 static int tcp_fd = -1;
-static int udp_fd = -1;
 static struct sockaddr_in server_tcp_addr;
-static struct sockaddr_in server_udp_addr;
 static pthread_t receive_thread;
 static message_callback_t message_callback = NULL;
 static bool connected = false;
@@ -101,7 +99,7 @@ static void* tcp_receive_thread(void* arg) {
     return NULL;
 }
 
-int network_connect(const char* host, int tcp_port, int udp_port) {
+int network_connect(const char* host, int tcp_port) {
     // Resolve hostname
     struct hostent* server = gethostbyname(host);
     if (!server) {
@@ -134,21 +132,6 @@ int network_connect(const char* host, int tcp_port, int udp_port) {
         return -1;
     }
     
-    // Create UDP socket
-    udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_fd < 0) {
-        set_error("Failed to create UDP socket");
-        close(tcp_fd);
-        tcp_fd = -1;
-        return -1;
-    }
-    
-    // Setup UDP server address
-    memset(&server_udp_addr, 0, sizeof(server_udp_addr));
-    server_udp_addr.sin_family = AF_INET;
-    memcpy(&server_udp_addr.sin_addr.s_addr, server->h_addr, server->h_length);
-    server_udp_addr.sin_port = htons(udp_port);
-    
     connected = true;
     running = true;
     buffer_pos = 0;
@@ -160,7 +143,7 @@ int network_connect(const char* host, int tcp_port, int udp_port) {
         return -1;
     }
     
-    printf("[Client C] Connected to %s:%d (TCP), %d (UDP)\n", host, tcp_port, udp_port);
+    printf("[Client C] Connected to %s:%d (TCP)\n", host, tcp_port);
     return 0;
 }
 
@@ -192,26 +175,6 @@ int network_send_tcp(const char* message_json) {
     return 0;
 }
 
-int network_send_udp(const char* message_json) {
-    if (!connected || udp_fd < 0) {
-        set_error("Not connected");
-        return -1;
-    }
-    
-    size_t json_len = strlen(message_json);
-    
-    // Send UDP datagram
-    ssize_t sent = sendto(udp_fd, message_json, json_len, 0,
-                          (struct sockaddr*)&server_udp_addr, sizeof(server_udp_addr));
-    
-    if (sent != (ssize_t)json_len) {
-        set_error("UDP send failed");
-        return -1;
-    }
-    
-    return 0;
-}
-
 void network_set_callback(message_callback_t callback) {
     message_callback = callback;
 }
@@ -224,15 +187,10 @@ void network_disconnect(void) {
     running = false;
     connected = false;
     
-    // Close sockets
+    // Close socket
     if (tcp_fd >= 0) {
         close(tcp_fd);
         tcp_fd = -1;
-    }
-    
-    if (udp_fd >= 0) {
-        close(udp_fd);
-        udp_fd = -1;
     }
     
     // Wait for receive thread to finish

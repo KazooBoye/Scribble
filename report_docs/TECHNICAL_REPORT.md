@@ -1,7 +1,7 @@
 # BÁO CÁO KỸ THUẬT DỰ ÁN SCRIBBLE
 ## Multiplayer Drawing & Guessing Game
 
-**Ngày báo cáo:** 07/12/2025  
+**Ngày báo cáo:** 26/12/2025  
 **Môn học:** Lập trình mạng (Network Programming)  
 **Người thực hiện:** Cao Duc Anh
 
@@ -25,20 +25,22 @@
 ## 1. TỔNG QUAN DỰ ÁN
 
 ### 1.1. Mô tả dự án
-Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, được xây dựng hoàn toàn bằng ngôn ngữ C cho phần backend (server + client proxy) kết hợp với Web UI hiện đại.
+Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, được xây dựng với C backend server kết hợp với Pygame client. Server sử dụng C thuần với POSIX threads và Berkeley sockets, trong khi client sử dụng Python/Pygame với C networking library thông qua ctypes.
 
 ### 1.2. Mục tiêu
 - Xây dựng game server xử lý logic game và quản lý phòng chơi
-- Phát triển client proxy đa luồng để bridge giữa WebSocket và TCP/UDP
+- Phát triển Pygame client với C networking library
 - Triển khai hệ thống matchmaking thông minh
-- Đảm bảo đồng bộ real-time cho drawing và chat
+- Đảm bảo đồng bộ real-time cho drawing và chat qua TCP
 - Xử lý reconnection và persistence
+- Tạo UI trực quan với Pygame rendering
 
-### 1.3. Công nghệ sử dụng
-- **Backend**: C11, POSIX threads, Berkeley sockets
-- **Frontend**: HTML5, CSS3, JavaScript (ES6+)
-- **Protocols**: HTTP, TCP, UDP, WebSocket
+### Server**: C11, POSIX threads, Berkeley sockets
+- **Client**: Python 3.x, Pygame, ctypes
+- **Networking Library**: C (compiled to .dylib/.so)
+- **Protocol**: TCP with 4-byte length prefix
 - **Data Format**: JSON
+- **Cross-platform**: macOS, Linux
 - **Cross-platform**: macOS, Linux/WSL
 
 ---
@@ -49,34 +51,31 @@ Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, đ�
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    WEB BROWSERS (Clients)                    │
-│              HTML/CSS/JS + Canvas API + WebSocket            │
+│              PYGAME CLIENTS (Python + Pygame)               │
+│         Pygame UI + Canvas + ctypes → C Library             │
 └──────────────────┬──────────────────────────────────────────┘
-                   │ WebSocket (Port 8081)
-                   │ JSON Messages
+                   │ ctypes call
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    CLIENT PROXY (C Program)                  │
-│                      Multi-threaded Bridge                    │
-├──────────────────┬──────────────┬──────────────┬────────────┤
-│  WS Thread       │  TCP Thread  │  UDP Thread  │ Dispatcher │
-│  (Port 8081)     │  (Port 9090) │  (Port 9091) │   (Router) │
-│  - Accept        │  - Game      │  - Drawing   │  - Queue   │
-│    WebSocket     │    logic     │    strokes   │  - Mutex   │
-│  - Multiple      │  - Chat      │  - Low       │  - Thread  │
-│    clients       │  - State     │    latency   │    safe    │
-└──────────────────┴──────────────┴──────────────┴────────────┘
-                   │ TCP + UDP
+│           C NETWORKING LIBRARY (libscribble_client)         │
+│              network.c - Berkeley Sockets                   │
+│              - TCP socket management                        │
+│              - Message framing (length prefix)              │
+│              - Compiled to .dylib (macOS) / .so (Linux)     │
+│              - Called via Python ctypes                     │
+└──────────────────┬──────────────────────────────────────────┘
+                   │ TCP (Port 9090)
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      GAME SERVER (C Program)                 │
+│                      GAME SERVER (C Program)                │
 ├─────────────────┬──────────────┬──────────────┬─────────────┤
-│  HTTP Server    │  TCP Server  │  UDP Server  │   Game      │
-│  (Port 8080)    │  (Port 9090) │  (Port 9091) │   Engine    │
-│  - Static       │  - Per-      │  - Stroke    │  - Match    │
-│    files        │    client    │    broadcast │  - Rooms    │
-│  - index.html   │    sockets   │  - Canvas    │  - Rounds   │
-│  - WebUI        │  - JSON      │    sync      │  - Scoring  │
+│  TCP Server     │  Game Engine │  Matchmaking │  Timer      │
+│  (Port 9090)    │              │              │  Thread     │
+│  - Per-client   │  - Rooms     │  - Auto      │  - 1Hz      │
+│    sockets      │  - Rounds    │    match     │    tick     │
+│  - Select()     │  - Scoring   │  - Private   │  - Round    │
+│  - Broadcast    │  - Drawing   │    rooms     │    timer    │
+│  - JSON msg     │    state     │  - Join code │  - Updates  │
 └─────────────────┴──────────────┴──────────────┴─────────────┘
 ```
 
@@ -84,20 +83,28 @@ Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, đ�
 
 **Game State Flow:**
 ```
-Browser → WebSocket → Client Proxy (Dispatcher) → TCP → Server
-                                                           ↓
-                                                    Game Logic
-                                                           ↓
-Server → TCP → Client Proxy (Dispatcher) → WebSocket → Browser
+Pygame → ctypes → C Library → TCP → Server
+                                       ↓
+                                 Game Logic
+                                       ↓
+Server → TCP → C Library → ctypes → Pygame
 ```
 
-**Drawing Flow (Low Latency):**
+**Drawing Flow (TCP with JSON):**
 ```
-Drawer Browser → WebSocket → Client Proxy → TCP/WebSocket → Server
-                                                                 ↓
-                                                    Broadcast to room
-                                                                 ↓
-Server → TCP/WebSocket → Client Proxy → WebSocket → Other Browsers
+Drawer Pygame → C Library → TCP → Server
+                                      ↓
+                              Broadcast to room
+                                      ↓
+Server → TCP → C Library → Other Pygame Clients
+```
+
+**Message Format:**
+```
+[4-byte length (big-endian)][JSON payload]
+
+Example:
+[0x00, 0x00, 0x00, 0x3A] {"type":2,"data":{"username":"Alice"}}
 ```
 
 ---
@@ -107,19 +114,20 @@ Server → TCP/WebSocket → Client Proxy → WebSocket → Other Browsers
 ### 3.1. Use Case: Join Game via Auto Matchmaking
 
 **Actor:** Người chơi  
-**Precondition:** Server đang chạy, browser hỗ trợ WebSocket  
+**Precondition:** Server đang chạy, Pygame client đã build  
 
 **Main Flow:**
-1. Người chơi mở `http://localhost:8080`
-2. Nhập username và click "Play Now"
-3. Client gửi `MSG_REGISTER` → Server
-4. Server trả về `MSG_REGISTER_ACK` với `player_id` và `session_token`
-5. Client gửi `MSG_JOIN_ROOM` với room_id = 0 (auto matchmaking)
-6. Server tìm room phù hợp hoặc tạo room mới
-7. Server trả về `MSG_ROOM_JOINED` với thông tin room
-8. Khi đủ 2+ người chơi, countdown 15 giây bắt đầu
-9. Server broadcast `MSG_COUNTDOWN_UPDATE` mỗi giây
-10. Sau 15 giây, game bắt đầu với `MSG_GAME_START`
+1. Người chơi chạy `python3 client_pygame/main.py --host localhost --port 9090`
+2. Pygame window hiển thị landing screen
+3. Nhập username và click "Play Now"
+4. Client gửi `MSG_REGISTER` → Server qua TCP
+5. Server trả về `MSG_REGISTER_ACK` với `player_id` và `session_token`
+6. Client gửi `MSG_JOIN_ROOM` với room_id = 0 (auto matchmaking)
+7. Server tìm room phù hợp hoặc tạo room mới
+8. Server trả về `MSG_ROOM_JOINED` với thông tin room
+9. Khi đủ 2+ người chơi, countdown 15 giây bắt đầu
+10. Server broadcast `MSG_COUNTDOWN_UPDATE` mỗi giây
+11. Sau 15 giây, game bắt đầu với `MSG_GAME_START`
 
 **Postcondition:** Người chơi vào room và chờ game bắt đầu
 
@@ -130,17 +138,17 @@ Server → TCP/WebSocket → Client Proxy → WebSocket → Other Browsers
 
 **Main Flow:**
 1. Server gửi `MSG_YOUR_TURN` và `MSG_WORD_TO_DRAW` cho drawer
-2. Drawer nhận được từ cần vẽ
-3. UI hiển thị drawing tools (color palette, brush size)
-4. Drawer vẽ trên canvas:
-   - Mouse move → tạo stroke {x1, y1, x2, y2, color, thickness}
-   - Client gửi `UDP_STROKE` qua WebSocket
-5. Server nhận stroke và broadcast cho tất cả players khác
-6. Other players nhận stroke và vẽ trên canvas của họ
+2. Drawer nhận được từ cần vẽ, hiển thị ở top of canvas
+3. UI hiển thị drawing tools (color palette, brush size slider)
+4. Drawer vẽ trên canvas bằng Pygame:
+   - Mouse drag → tạo stroke {x1, y1, x2, y2, color, thickness}
+   - Client gửi `MSG_STROKE` (type 100) qua TCP với JSON data
+5. Server nhận stroke và broadcast cho tất cả players khác trong room
+6. Other players nhận stroke và vẽ trên Pygame canvas
 7. Drawing đồng bộ real-time cho tất cả players
 
 **Alternative Flow:**
-- Drawer click "Clear Canvas" → Server broadcast `UDP_CLEAR_CANVAS`
+- Drawer click "Clear Canvas" → Server broadcast `MSG_CLEAR_CANVAS` (type 101)
 
 ### 3.3. Use Case: Guessing Phase
 
@@ -222,21 +230,12 @@ Server → TCP/WebSocket → Client Proxy → WebSocket → Other Browsers
 
 ```
 server/
-├── main.c                          # Entry point, khởi tạo các servers
-│
-├── http/                           # HTTP Server cho static files
-│   ├── http_server.c/.h           # HTTP server chính (port 8080)
-│   ├── router.c/.h                # URL routing
-│   └── mime.c/.h                  # MIME type detection
+├── main.c                          # Entry point, khởi tạo TCP server và timer
 │
 ├── tcp/                           # TCP Server cho game logic
-│   ├── tcp_server.c/.h           # TCP socket management
-│   ├── tcp_handler.c/.h          # Message handlers
+│   ├── tcp_server.c/.h           # TCP socket management với select()
+│   ├── tcp_handler.c/.h          # Message handlers (30+ types)
 │   └── tcp_parser.c/.h           # JSON message parsing
-│
-├── udp/                           # UDP Server cho drawing
-│   ├── udp_server.c/.h           # UDP socket management
-│   └── udp_broadcast.c/.h        # Broadcast strokes
 │
 ├── game/                          # Game Logic
 │   ├── game_logic.c/.h           # Core game mechanics
@@ -246,37 +245,50 @@ server/
 └── utils/                         # Utilities
     ├── logger.c/.h               # JSON logging
     ├── timer.c/.h                # Timer thread
-    ├── json.c/.h                 # JSON utilities
-    └── endian_compat.h           # Cross-platform byte order
+    └── json.c/.h                 # JSON utilities
 ```
 
-### 4.2. Client Proxy Directory Structure
+### 4.2. Client C Library Directory Structure
 
 ```
-client_proxy/
-├── main.c                         # Entry point, spawn 4 threads
+client_c/
+├── network.c/.h                   # TCP socket operations
+│   ├── network_connect()         # Connect to server
+│   ├── network_send_tcp()        # Send with length prefix
+│   ├── network_recv_tcp()        # Receive with length prefix
+│   └── network_disconnect()      # Clean disconnect
 │
-├── threads/                       # Worker Threads
-│   ├── ws_thread.c/.h            # WebSocket listener thread
-│   ├── tcp_thread.c/.h           # TCP connection thread
-│   ├── udp_thread.c/.h           # UDP handler thread
-│   └── dispatcher.c/.h           # Message dispatcher thread
+└── Compiled to:
+    ├── libscribble_client.dylib  # macOS shared library
+    └── libscribble_client.so     # Linux shared library
+```
+
+### 4.3. Pygame Client Directory Structure
+
+```
+client_pygame/
+├── main.py                        # Main game loop và UI
+│   ├── ScribbleGame class        # Game state management
+│   ├── Button, InputBox          # UI components
+│   ├── Canvas rendering          # Pygame drawing
+│   └── Event handling            # Mouse, keyboard
 │
-└── utils/                         # Thread-safe utilities
-    ├── queue.c/.h                # Thread-safe message queue
-    ├── state_cache.c/.h          # Connection state management
-    └── json.c/.h                 # JSON parsing
-```
-
-### 4.3. Web UI Structure
-
-```
-webui/
-├── index.html                     # Main HTML structure
-├── style.css                      # Responsive styling
-├── websocket.js                   # WebSocket connection class
-├── drawing.js                     # Canvas drawing class
-└── main.js                        # Game controller class
+├── network_wrapper.py             # ctypes wrapper cho C library
+│   ├── NetworkClient class       # Python interface
+│   ├── connect()                 # Bind C functions
+│   ├── send_tcp()                # Send JSON messages
+│   └── receive()                 # Non-blocking receive
+│
+├── protocol.py                    # Message types và constants
+│   ├── MSG_TYPE enum             # 30 TCP message types
+│   ├── COLORS palette            # 10 drawing colors
+│   └── Helper functions          # Color conversion
+│
+├── resources.py                   # Asset management
+│   └── ResourceManager           # Load fonts, icons
+│
+└── res/                          # Resources directory
+    └── icon.png                  # Window icon
 ```
 
 ---
@@ -285,25 +297,7 @@ webui/
 
 ### 5.1. Game Server Components
 
-#### 5.1.1. HTTP Server (`http/http_server.c`)
-**Vai trò:** Phục vụ static files (HTML, CSS, JS) cho browser clients
-
-**Chức năng chính:**
-- Bind socket tại port 8080
-- Listen và accept HTTP connections
-- Parse HTTP requests (GET method)
-- Serve files từ `build/webui/` directory
-- Detect MIME types (text/html, text/css, application/javascript)
-- Return HTTP responses với proper headers
-
-**Key Functions:**
-```c
-int start_http_server(int port);              // Khởi tạo HTTP server
-void* http_server_thread(void* arg);          // Thread handler
-void handle_http_request(int client_fd);      // Xử lý request
-```
-
-#### 5.1.2. TCP Server (`tcp/tcp_server.c`)
+#### 5.1.1. TCP Server (`tcp/tcp_server.c`)
 **Vai trò:** Quản lý game connections và per-client TCP sockets
 
 **Chức năng chính:**
@@ -311,7 +305,7 @@ void handle_http_request(int client_fd);      // Xử lý request
 - Maintain mảng players với TCP socket cho mỗi client
 - Accept new connections và tạo Player struct
 - Use `select()` để handle multiple clients
-- Parse messages với 4-byte length prefix
+- Parse messages với 4-byte length prefix (big-endian)
 - Route messages đến appropriate handlers
 
 **Key Data Structures:**
@@ -339,18 +333,20 @@ void send_tcp_message(int fd, ...);           // Send with length prefix
 void broadcast_to_room(Room* room, ...);      // Broadcast to all players
 ```
 
-#### 5.1.3. UDP Server (`udp/udp_server.c`)
-**Vai trò:** Low-latency transmission cho drawing strokes
+#### 5.1.2. TCP Handler (`tcp/tcp_handler.c`)
+**Vai trò:** Process và route tất cả TCP messages
 
-**Note:** Hiện tại UDP không được sử dụng trực tiếp từ browser (browsers không hỗ trợ UDP). Strokes được gửi qua WebSocket → TCP thay thế. Code UDP vẫn giữ cho tương lai hoặc native clients.
+**Chức năng chính:**
+- Handle 30+ message types
+- Drawing messages (types 100-102): STROKE, CLEAR_CANVAS, UNDO
+- Game flow messages: REGISTER, JOIN_ROOM, GAME_START, etc.
+- Chat messages: CHAT, CHAT_BROADCAST
+- State updates: TIMER_UPDATE, SCORE_UPDATE, etc.
+- Broadcast messages to room members
+- Filter messages (e.g., không gửi stroke về người vẽ)
 
-**Chức năng:**
-- Bind socket tại port 9091
-- Receive stroke data
-- Broadcast đến room members
-- Binary protocol cho performance
-
-#### 5.1.4. Game Logic (`game/game_logic.c`)
+**Note:** Drawing messages vẫn dùng tên `UDP_STROKE`, `UDP_CLEAR_CANVAS` cho historical reasons nhưng thực tế transmitted qua TCP.
+#### 5.1.3. Game Logic (`game/game_logic.c`)
 **Vai trò:** Core game mechanics và room management
 
 **Key Data Structures:**
@@ -425,7 +421,7 @@ int remove_player_from_room(Room* room, Player* player);
   // - End round if drawer disconnects
 ```
 
-#### 5.1.5. Matchmaking (`game/matchmaking.c`)
+#### 5.1.4. Matchmaking (`game/matchmaking.c`)
 **Vai trò:** Auto matchmaking và room management
 
 **Chức năng:**
@@ -459,7 +455,7 @@ void iterate_active_rooms(void (*callback)(Room*));
   // - Call callback for each active room
 ```
 
-#### 5.1.6. Timer Thread (`utils/timer.c`)
+#### 5.1.5. Timer Thread (`utils/timer.c`)
 **Vai trò:** 1-second tick timer cho game updates
 
 **Chức năng:**
@@ -484,76 +480,74 @@ void* timer_thread(void* arg) {
 }
 ```
 
-### 5.2. Client Proxy Components
+### 5.2. C Networking Library (`client_c/`)
 
-#### 5.2.1. WebSocket Thread (`threads/ws_thread.c`)
-**Vai trò:** Accept và maintain WebSocket connections từ browsers
+#### 5.2.1. Network Module (`network.c/.h`)
+**Vai trò:** TCP socket wrapper compiled to shared library
 
-**Chức năng:**
-- Listen tại port 8081
-- Accept multiple browser connections
-- WebSocket handshake (SHA1 hash)
-- Parse WebSocket frames
-- Route messages đến Dispatcher
-- Send responses qua WebSocket
+**Chức năng chính:**
+- TCP connection management
+- 4-byte length prefix protocol (big-endian)
+- Send/receive with proper framing
+- Cross-platform: .dylib (macOS) / .so (Linux)
 
 **Key Functions:**
 ```c
-void* ws_thread_main(void* arg);
-  // - Bind port 8081
-  // - Accept connections
-  // - Spawn handler per connection
-
-void handle_ws_client(int client_fd);
-  // - Perform WebSocket handshake
-  // - Read frames
-  // - Parse JSON messages
-  // - Enqueue to dispatcher
-
-void ws_send_message(int fd, const char* json);
-  // - Frame JSON as WebSocket message
-  // - Send to browser
+int network_connect(const char* host, int port);
+int network_send_tcp(const char* msg, int len);
+int network_recv_tcp(char* buffer, int buffer_size);
+void network_disconnect();
 ```
 
-#### 5.2.2. TCP Thread (`threads/tcp_thread.c`)
-**Vai trò:** Maintain persistent TCP connection đến game server
+### 5.3. Pygame Client (`client_pygame/`)
 
-**Chức năng:**
-- Connect to server port 9090
-- Send messages với 4-byte length prefix
-- Receive and parse server messages
-- Enqueue responses đến Dispatcher
-- Auto-reconnect nếu connection lost
+#### 5.3.1. Main Game (`main.py`)
+**Vai trò:** UI rendering và game logic
 
-#### 5.2.3. Dispatcher Thread (`threads/dispatcher.c`)
-**Vai trò:** Thread-safe message routing hub
+**Components:**
+- ScribbleGame class: Main game controller
+- Button, InputBox: UI widgets
+- Canvas: Pygame drawing surface
+- State machine: LANDING → WAITING → PLAYING → ENDED
 
-**Chức năng:**
-- Maintain 2 thread-safe queues:
-  - `to_server_queue`: Messages từ WS → Server
-  - `to_client_queue`: Messages từ Server → WS
-- Use mutex và condition variables
-- Route messages dựa trên type và player_id
-- Ensure message ordering
+**Features:**
+- 1200x700 window
+- 60 FPS game loop
+- Mouse/keyboard events
+- Non-blocking network receive
+- Drawing tools: 10 colors, variable brush size
+- Chat system
+- Players list sidebar
+- Timer display
 
-**Key Data Structure:**
-```c
-typedef struct {
-    MessageType type;
-    uint32_t player_id;    // Target client
-    char* json_data;
-    size_t data_len;
-} QueuedMessage;
+#### 5.3.2. Network Wrapper (`network_wrapper.py`)
+**Vai trò:** Python ctypes bridge to C library
+
+**Implementation:**
+```python
+class NetworkClient:
+    def __init__(self):
+        self.lib = ctypes.CDLL('libscribble_client.dylib')
+        # Bind C functions
+        
+    def send_tcp(self, msg_type, data):
+        message = {"type": msg_type, "data": data}
+        json_str = json.dumps(message)
+        return self.lib.network_send_tcp(...)
 ```
 
-#### 5.2.4. State Cache (`utils/state_cache.c`)
-**Vai trò:** Thread-safe connection state management
+#### 5.3.3. Protocol (`protocol.py`)
+**Vai trò:** Message types và constants
 
-**Chức năng:**
-- Map WebSocket connections → Player IDs
-- Store session tokens
-- Track connection status
-- Enable message routing
+**Definitions:**
+- MSG_TYPE: 30 TCP message types (0-29)
+- Drawing types: STROKE (100), CLEAR_CANVAS (101), UNDO (102)
+- COLORS: 10-color palette
+- Helper functions
+
+---
+
+**Note:** Client proxy (WebSocket bridge) đã được deprecated. System hiện tại sử dụng direct TCP connection từ Pygame client đến server.
 
 ---
 
@@ -561,7 +555,7 @@ typedef struct {
 
 ### 6.1. Message Types
 
-#### TCP Messages (Port 9090)
+#### TCP Messages (All communication via TCP port 9090)
 ```c
 typedef enum {
     MSG_PING = 0,
@@ -595,22 +589,20 @@ typedef enum {
     MSG_ERROR = 28,
     MSG_DISCONNECT = 29
 } MessageType;
-```
 
-#### UDP Messages (Port 9091)
-```c
+// Drawing Messages (also via TCP, historical naming)
 typedef enum {
-    UDP_STROKE = 100,
-    UDP_CLEAR_CANVAS = 101,
-    UDP_UNDO = 102
-} UDPMessageType;
+    UDP_STROKE = 100,        // Drawing stroke
+    UDP_CLEAR_CANVAS = 101,  // Clear canvas
+    UDP_UNDO = 102           // Undo last stroke (not implemented)
+} UDPMessageType;  // Note: Naming is historical, actually sent via TCP
 ```
 
 ### 6.2. Message Format
 
-**TCP Message Structure:**
+**TCP Message Structure (all messages):**
 ```
-[4 bytes: length][JSON payload]
+[4 bytes: length (big-endian)][JSON payload]
 ```
 
 Example:
@@ -618,18 +610,17 @@ Example:
 [0x00, 0x00, 0x00, 0x3A] {"type":2,"data":{"username":"Alice"}}
 ```
 
-**WebSocket Message Structure:**
+**Drawing Message (via TCP):**
 ```json
 {
     "type": 100,
     "data": {
-        "stroke_id": 42,
         "x1": 100.5,
         "y1": 150.2,
         "x2": 102.3,
         "y2": 152.1,
-        "color": 0,
-        "thickness": 5
+        "color": 0,      // Color palette index (0-9)
+        "thickness": 5   // Brush size (2-20)
     }
 }
 ```
@@ -638,25 +629,25 @@ Example:
 
 **1. Connection & Registration:**
 ```
-Browser → WS → Proxy → TCP → Server
+Pygame → C Library → TCP → Server
 {"type": 2, "data": {"username": "Alice"}}
 
-Server → TCP → Proxy → WS → Browser
+Server → TCP → C Library → Pygame
 {"type": 3, "data": {"player_id": 123, "session_token": "..."}}
 ```
 
 **2. Join Matchmaking:**
 ```
-Browser → WS → Proxy → TCP → Server
+Pygame → TCP → Server
 {"type": 4, "data": {"room_id": 0}}
 
-Server → TCP → Proxy → WS → Browser
+Server → TCP → Pygame
 {"type": 7, "data": {"room_id": 1, "players": [...]}}
 ```
 
 **3. Countdown (khi 2nd player joins):**
 ```
-Server → All Players (every second)
+Server → All Players (every second via TCP)
 {"type": 19, "data": {"countdown": 15}}
 {"type": 19, "data": {"countdown": 14}}
 ...
@@ -665,7 +656,7 @@ Server → All Players (every second)
 
 **4. Game Start:**
 ```
-Server → All Players
+Server → All Players (via TCP)
 {"type": 10, "data": {
     "round": 1,
     "total_rounds": 3,
@@ -673,20 +664,20 @@ Server → All Players
     "word_mask": "_ _ _"
 }}
 
-Server → Drawer Only
+Server → Drawer Only (via TCP)
 {"type": 12, "data": {"word": "cat"}}
 ```
 
 **5. Drawing Phase:**
 ```
-Drawer → Server (continuous)
+Drawer → Server (via TCP, continuous)
 {"type": 100, "data": {
     "x1": 100, "y1": 150,
     "x2": 102, "y2": 152,
     "color": 1, "thickness": 5
 }}
 
-Server → Other Players (broadcast)
+Server → Other Players (broadcast via TCP)
 {"type": 100, "data": {
     "x1": 100, "y1": 150,
     "x2": 102, "y2": 152,
@@ -697,10 +688,10 @@ Server → Other Players (broadcast)
 
 **6. Guessing:**
 ```
-Guesser → Server
+Guesser → Server (via TCP)
 {"type": 14, "data": {"message": "cat"}}
 
-Server → All Players (if correct)
+Server → All Players (if correct, via TCP)
 {"type": 16, "data": {
     "player_id": 456,
     "username": "Bob",
@@ -710,23 +701,23 @@ Server → All Players (if correct)
 
 **7. Round End & Next Round:**
 ```
-Server → All Players
+Server → All Players (via TCP)
 {"type": 20, "data": {"players": [...]}}
 
-Server → All Players
+Server → All Players (via TCP)
 {"type": 13, "data": {
     "round": 2,
     "total_rounds": 3,
     "word_mask": "_ _ _ _"
 }}
 
-Server → New Drawer
+Server → New Drawer (via TCP)
 {"type": 12, "data": {"word": "bird"}}
 ```
 
 **8. Game End:**
 ```
-Server → All Players
+Server → All Players (via TCP)
 {"type": 21, "data": {
     "players": [
         {"player_id": 123, "username": "Alice", "score": 950},
@@ -774,39 +765,46 @@ Server → All Players
 - [x] **Early round end:** Nếu tất cả đã đoán → end round sớm
 
 ### 7.5. UI/UX ✅
-- [x] **Modern responsive design:** Flexbox layout
-- [x] **Landing page:** Play Now, Create Room, Join Room
-- [x] **Game page:** Canvas, Players list, Chat, Drawing tools
-- [x] **Players sidebar:** Hiển thị tên, điểm, online status
-- [x] **Room info:** Room code, Round X/Y display
+- [x] **Pygame rendering:** Hardware-accelerated graphics
+- [x] **Responsive layout:** 1200x700 window
+- [x] **Landing screen:** Play Now, Create Room, Join Room buttons
+- [x] **Waiting screen:** Room code, countdown, players list
+- [x] **Game screen:** Canvas, Players sidebar, Chat, Drawing tools
+- [x] **Players sidebar:** Names, scores, online status, drawing indicator
+- [x] **Room info:** Room code display, Round X/Y counter
 - [x] **Timer display:** Countdown timer màu đỏ khi < 10s
-- [x] **Word display:** Masked word với _ _ _
-- [x] **Drawer sees word:** Full word cho drawer
-- [x] **Status messages:** Info, success, error notifications
+- [x] **Word display:** Masked word với underscores
+- [x] **Drawer sees word:** Full word displayed at top
+- [x] **Status messages:** Info/success/error notifications
 - [x] **Game end screen:** Rankings với crown 👑 cho winner
-- [x] **Return to home button:** Quay về landing page sau game
+- [x] **Return to home button:** Quay về landing sau game
+- [x] **Smooth drawing:** Line caps và circles cho smooth strokes
+- [x] **Color palette:** 10 colors với visual selection feedback
+- [x] **Brush size slider:** 2-20px adjustable thickness
 
 ### 7.6. Server Infrastructure ✅
-- [x] **HTTP server:** Serve static files (port 8080)
-- [x] **TCP server:** Game logic (port 9090)
-- [x] **UDP server:** Low-latency strokes (port 9091)
-- [x] **Multi-threading:** HTTP, TCP, UDP, Timer threads
+- [x] **TCP server:** Game logic và communication (port 9090)
+- [x] **Multi-threading:** TCP server thread + Timer thread
 - [x] **Per-client sockets:** Mỗi player có TCP socket riêng
 - [x] **Message broadcasting:** Efficient room broadcast
 - [x] **Connection handling:** Clean disconnect detection
+- [x] **select() multiplexing:** Handle multiple clients efficiently
 
-### 7.7. Client Proxy ✅
-- [x] **WebSocket server:** Accept browser connections (port 8081)
-- [x] **Multi-threaded proxy:** 4 independent threads
-- [x] **Message dispatcher:** Thread-safe queue với mutex
-- [x] **TCP bridge:** Persistent connection đến game server
-- [x] **State cache:** Track player IDs và connections
+### 7.7. Client Library ✅
+- [x] **C networking library:** Compiled shared library
+- [x] **TCP socket management:** Connect, send, receive, disconnect
+- [x] **Message framing:** 4-byte length prefix protocol
+- [x] **Big-endian byte order:** Network byte order compliance
+- [x] **Cross-platform build:** .dylib (macOS) / .so (Linux)
+- [x] **ctypes integration:** Python-C bridge via ctypes
+- [x] **Non-blocking receive:** Timeout-based receive
+- [x] **Error handling:** Proper return codes
 
 ### 7.8. Cross-Platform ✅
-- [x] **macOS support:** Compile với CommonCrypto
-- [x] **Linux support:** Compile với OpenSSL
-- [x] **WSL support:** Port forwarding và mirrored networking
-- [x] **Endian compatibility:** htobe64/be64toh wrappers
+- [x] **macOS support:** Compile và run native
+- [x] **Linux support:** Compatible build system
+- [x] **Python 3.x:** Compatible với Python 3.8+
+- [x] **Pygame support:** Works với Pygame 2.x
 
 ### 7.9. Player Management ✅
 - [x] **Player registration:** Assign unique player_id
@@ -826,6 +824,36 @@ Server → All Players
 - [x] **Round events:** Started, ended, word selected
 - [x] **Guess logging:** Correct/wrong guesses
 - [x] **Stroke logging:** Drawing actions
+
+### 7.11. Persistent Player Stats ✅
+- [x] **Stats file system:** CSV format in `server/data/player_stats.txt`
+- [x] **Tracked metrics:**
+  - Games played and won
+  - Total score accumulated
+  - Correct guesses count
+  - Rounds drawn count
+  - Fastest guess time (milliseconds)
+  - Last played timestamp
+- [x] **Auto save:** Stats updated after each game ends
+- [x] **Load on register:** Player stats loaded when connecting
+- [x] **Thread-safe:** Mutex-protected file operations
+- [x] **Leaderboard support:** Get top N players by total score
+
+### 7.12. Reconnection System ✅
+- [x] **Session tokens:** Generated on player register
+- [x] **State preservation:** Player/room state saved on disconnect (5min timeout)
+- [x] **Auto-reconnect:** Client detects disconnection and auto-retries
+- [x] **State restoration:** Full game state restored on successful reconnect
+- [x] **Messages:** MSG_RECONNECT_REQUEST/SUCCESS/FAIL
+- [x] **Server-side:**
+  - Save player state to memory on disconnect
+  - Cleanup expired states (>5 minutes)
+  - Restore player to room on reconnect
+- [x] **Client-side:**
+  - Store session token locally
+  - Detect connection loss
+  - Auto-retry with exponential backoff
+  - UI feedback for reconnection status
 
 ---
 
@@ -1075,9 +1103,150 @@ void reveal_hint(Room* room) {
 
 ## 9. VẤN ĐỀ VÀ GIẢI PHÁP
 
-### 9.1. Race Condition Issues
+### 9.1. Migration từ Web UI sang Pygame Client ✅ COMPLETED
 
-#### 9.1.1. Timer Thread Race Condition ⚠️
+**Context ban đầu:**
+- Server có HTTP server + WebSocket proxy + UDP server
+- Client là Web UI với HTML/CSS/JavaScript
+- Architecture phức tạp: Browser → WebSocket → Proxy → TCP/UDP → Server
+
+**Vấn đề:**
+1. **WebSocket proxy** thêm complexity không cần thiết
+2. **HTTP server** chỉ serve static files
+3. **Web Canvas API** có limitations về performance
+4. **Browser limitations:** Không thể dùng UDP trực tiếp
+5. **4-thread proxy** overkill cho simple game
+
+**Giải pháp:**
+- Migrate toàn bộ sang Pygame client với direct TCP connection
+- Loại bỏ HTTP server, WebSocket proxy
+- Client library trong C compiled thành shared library
+- Python ctypes bridge cho Pygame
+
+**Kết quả:**
+✅ Architecture đơn giản hơn rất nhiều
+✅ Direct TCP connection, không cần proxy
+✅ Native performance với Pygame rendering
+✅ Code maintainability tốt hơn
+✅ Easier deployment (không cần web server)
+
+### 9.2. UDP Implementation và Complete Reversion ✅ COMPLETED
+
+#### Timeline của UDP Feature
+
+**Phase 1: Initial UDP Implementation (Dec 2024)**
+**Mô tả:** Implement UDP protocol để broadcast drawing strokes cho performance
+
+**Implementation:**
+- Server có UDP server thread tại port 9091
+- Binary protocol: 41-byte packets
+  ```c
+  struct UDPStroke {
+      uint8_t type;           // 1 byte: message type
+      uint32_t room_id;       // 4 bytes: room identifier
+      uint32_t stroke_id;     // 4 bytes: stroke sequence
+      float x1, y1, x2, y2;   // 16 bytes: coordinates
+      uint32_t color;         // 4 bytes: color value
+      uint32_t thickness;     // 4 bytes: brush size
+      uint64_t timestamp;     // 8 bytes: timing
+  };  // Total: 41 bytes
+  ```
+- Client gửi strokes qua UDP socket
+- Server nhận và broadcast via UDP
+
+**Problems Encountered:**
+1. **Player identification issue:** UDP packets không có connection state, phải lookup player bằng IP address
+2. **Hybrid broadcast:** Nhận UDP nhưng phải broadcast lại qua TCP vì client logic
+3. **Complexity explosion:** Maintain cả TCP và UDP sockets, sync state giữa 2 protocols
+4. **Observer không thấy canvas:** UDP-to-TCP conversion có bugs
+5. **Binary packing overhead:** Client phải pack/unpack binary structs
+
+**Phase 2: UDP-to-TCP Hybrid (mid-Dec 2024)**
+**Attempt:** Keep UDP receive nhưng broadcast via TCP
+
+**Implementation:**
+```c
+// Server nhận UDP packet
+void handle_udp_packet(const char* packet, struct sockaddr_in* client_addr) {
+    // Deserialize binary packet
+    Stroke stroke = deserialize_udp_stroke(packet);
+    
+    // Find player by IP address
+    Player* player = find_player_by_ip(client_addr->sin_addr.s_addr);
+    
+    // Broadcast via TCP to room members
+    broadcast_to_room(player->room, UDP_STROKE, serialize_json(stroke), player);
+}
+```
+
+**Still problematic:**
+- IP-based player lookup unreliable (NAT, proxies)
+- UDP packets có thể arrive out-of-order
+- Error handling phức tạp
+- Debugging nightmare
+
+**Phase 3: Complete Reversion to TCP (late Dec 2024)** ✅
+
+**Decision:** Abandon UDP hoàn toàn, chuyển strokes về TCP với JSON
+
+**Rationale:**
+1. **Simplicity > Performance:** TCP overhead không đáng kể cho game này
+2. **Reliability:** TCP đảm bảo delivery và ordering
+3. **Single protocol:** Easier to debug và maintain
+4. **JSON consistency:** Không cần binary packing/unpacking
+
+**Implementation Steps:**
+1. ✅ Removed UDP server initialization từ `server/main.c`
+2. ✅ Updated `tcp/tcp_handler.c` để handle stroke messages (type 100)
+3. ✅ Removed UDP socket từ `client_c/network.c`
+4. ✅ Removed `network_send_udp()` function
+5. ✅ Updated Python client để gửi strokes via TCP
+6. ✅ Changed `send_udp()` → `send_tcp()` calls
+7. ✅ Removed binary packing code (80+ lines)
+8. ✅ Updated Makefile để không compile UDP sources
+9. ✅ Moved UDP files to `deprecated/udp/`
+
+**Code Changes:**
+```python
+# Before (Binary UDP):
+def _pack_udp_stroke(self, stroke_id, x1, y1, x2, y2, color, thickness):
+    return struct.pack(
+        '!BIIffffIIQ',  # 41 bytes
+        100, self.room_id, stroke_id,
+        x1, y1, x2, y2,
+        color, thickness, int(time.time() * 1000)
+    )
+
+# After (JSON TCP):
+def send_stroke(self, x1, y1, x2, y2, color, thickness):
+    self.send_tcp(MSG_TYPE.STROKE, {
+        "x1": x1, "y1": y1,
+        "x2": x2, "y2": y2,
+        "color": color,
+        "thickness": thickness
+    })
+```
+
+**Results:**
+✅ **Simplified architecture:** TCP-only communication
+✅ **Working canvas sync:** Observer nhìn thấy drawing real-time
+✅ **Maintainable code:** JSON messages dễ debug
+✅ **No performance issues:** TCP đủ nhanh cho use case này
+✅ **Code reduction:** Removed 200+ lines of UDP code
+
+**Lessons Learned:**
+1. **KISS principle:** Keep It Simple, Stupid - đừng over-engineer
+2. **Premature optimization:** UDP "cho performance" nhưng không cần thiết
+3. **Complexity cost:** Hybrid protocols tốn effort maintain hơn performance gain
+4. **Debug difficulty:** Binary protocols khó debug hơn JSON nhiều
+5. **TCP is good enough:** Cho real-time game scale nhỏ, TCP performance OK
+
+**Historical Note:**
+Message types 100-102 vẫn giữ prefix `UDP_` trong code (ví dụ `UDP_STROKE`) vì lý do historical. Chúng thực tế được transmitted qua TCP.
+
+### 9.3. Race Condition Issues
+
+#### 9.3.1. Timer Thread Race Condition ⚠️
 **Vấn đề:**
 - Timer thread và TCP handler thread cùng access room state
 - Không có mutex protection
@@ -1134,7 +1303,7 @@ int process_guess(Room* room, ...) {
 }
 ```
 
-#### 9.1.2. Message Ordering Race ✅ FIXED
+#### 9.3.2. Message Ordering Race ✅ FIXED
 **Vấn đề ban đầu:**
 - MSG_WORD_TO_DRAW có thể arrive sau MSG_ROUND_START
 - Drawer không thấy từ cần vẽ
@@ -1147,9 +1316,9 @@ int process_guess(Room* room, ...) {
   3. `handleWordToDraw(data)` - dedicated message
 - Fallback mechanism đảm bảo drawer luôn nhận được word
 
-### 9.2. Canvas Synchronization Issues
+### 9.4. Canvas Synchronization Issues
 
-#### 9.2.1. Other Players Cannot See Drawing ✅ FIXED
+#### 9.4.1. Other Players Cannot See Drawing ✅ FIXED
 **Vấn đề ban đầu:**
 - Drawer vẽ nhưng người khác không thấy
 - Root cause: Stroke data được wrap 2 lần
@@ -1184,7 +1353,7 @@ int process_guess(Room* room, ...) {
 - Sử dụng color palette index (0-9) thay vì hex color
 - Test kỹ message format
 
-#### 9.2.2. Color Not Synchronized ✅ FIXED
+#### 9.4.2. Color Not Synchronized ✅ FIXED
 **Vấn đề:**
 - Drawer dùng màu khác black, người khác không thấy màu đó
 - Root cause: Hex color → int conversion sai
@@ -1202,7 +1371,7 @@ int process_guess(Room* room, ...) {
 - Gửi color index thay vì color value
 - Đơn giản hóa protocol và đảm bảo consistency
 
-#### 9.2.3. Canvas Blank After Round 2 ✅ FIXED
+#### 9.4.3. Canvas Blank After Round 2 ✅ FIXED
 **Vấn đề ban đầu:**
 - Round 1 OK, từ round 2 trở đi canvas trắng
 - Root cause: Clear canvas không được broadcast đúng
@@ -1212,35 +1381,68 @@ int process_guess(Room* room, ...) {
 - Clear strokes array trên server: `room->stroke_count = 0`
 - Broadcast clear command đến tất cả players
 
-### 9.3. Network Issues
+### 9.5. Network Issues
 
-#### 9.3.1. WSL2 Networking ✅ FIXED
+#### 9.5.1. Remote Server Connection ✅ FIXED
 **Vấn đề:**
-- Server chạy trên WSL, không thể access từ LAN
-- Chỉ localhost:8080 hoạt động, không thể dùng IP
+- Pygame client kết nối đến server remote (192.168.1.2)
+- Bị firewall block connections
+- Connection timeout
 
 **Root cause:**
-- WSL2 dùng virtualized network adapter
-- Default NAT mode không expose ports ra host Windows
+- Firewall trên server machine block incoming TCP connections
+- Port 9090 không được mở
 
-**Giải pháp 1: Port Forwarding (PowerShell)**
-```powershell
-# Get WSL IP
-$wslIp = (wsl hostname -I).Trim()
+**Giải pháp:**
+```bash
+# Open firewall port on server
+sudo ufw allow 9090/tcp
 
-# Forward ports
-netsh interface portproxy add v4tov4 `
-    listenport=8080 listenaddress=0.0.0.0 `
-    connectport=8080 connectaddress=$wslIp
+# Or disable firewall for testing
+sudo ufw disable
 ```
 
-**Giải pháp 2: Mirrored Networking (.wslconfig)**
-```ini
-[wsl2]
-networkingMode=mirrored
+**Testing:**
+```bash
+# From client machine
+telnet 192.168.1.2 9090
+
+# If successful, connection works
 ```
 
-#### 9.3.2. Cross-Platform Compilation ✅ FIXED
+**Result:** ✅ Client có thể connect từ LAN machines khác
+
+#### 9.5.2. JSON Parsing Issues ✅ FIXED
+**Vấn đề:**
+- Server C code parse JSON không handle whitespace sau colon
+- Python `json.dumps()` tạo `"key": value` (có space)
+- Server expect `"key":value` (không space)
+- Parse failed
+
+**Example:**
+```python
+# Python generates:
+{"type": 2, "data": {"username": "Alice"}}
+       ↑        ↑                  ↑  spaces!
+
+# Server expected:
+{"type":2,"data":{"username":"Alice"}}
+```
+
+**Giải pháp:**
+Update `server/utils/json.c` để skip whitespace:
+```c
+const char* json_get_string(const char* json, const char* key, char* out) {
+    char* ptr = strstr(json, key);
+    if (!ptr) return NULL;
+    
+    ptr += strlen(key);
+    while (*ptr == ':' || *ptr == ' ' || *ptr == '\t') ptr++;  // Skip whitespace
+    // ... rest of parsing
+}
+```
+
+**Result:** ✅ Server parse JSON từ Python client correctly
 **Vấn đề:**
 - macOS dùng CommonCrypto, Linux dùng OpenSSL
 - Byte order functions khác nhau (htobe64)
@@ -1257,9 +1459,9 @@ networkingMode=mirrored
 - Makefile detect OS và link proper libraries
 - Crypto macros cho SHA1
 
-### 9.4. Game Logic Issues
+### 9.6. Game Logic Issues
 
-#### 9.4.1. Fixed 5-Player Rounds ✅ FIXED
+#### 9.6.1. Fixed 5-Player Rounds ✅ FIXED
 **Vấn đề ban đầu:**
 - Game luôn expect 5 players, 5 rounds
 - Với 2-3 players, logic không work
@@ -1295,7 +1497,7 @@ int remove_player_from_room(Room* room, Player* player) {
 }
 ```
 
-#### 9.4.2. Guesser Not Seeing Correct Notification ✅ FIXED
+#### 9.6.2. Guesser Not Seeing Correct Notification ✅ FIXED
 **Vấn đề:**
 - Player đoán đúng nhưng không thấy green notification
 - Other players thấy nhưng guesser không thấy
@@ -1314,7 +1516,7 @@ int remove_player_from_room(Room* room, Player* player) {
   ```
 - Đảm bảo notification luôn hiển thị
 
-#### 9.4.3. Round Count UI Not Updating ✅ FIXED
+#### 9.6.3. Round Count UI Not Updating ✅ FIXED
 **Vấn đề:**
 - UI hardcoded "Round: X/5"
 - Không reflect dynamic total_rounds
@@ -1328,9 +1530,9 @@ int remove_player_from_room(Room* room, Player* player) {
   document.getElementById('total-rounds').textContent = data.total_rounds;
   ```
 
-### 9.5. Memory Management Issues
+### 9.7. Memory Management Issues
 
-#### 9.5.1. Memory Leaks ⚠️
+#### 9.7.1. Memory Leaks ⚠️
 **Potential issues chưa fully test:**
 - JSON strings allocated với `malloc()` có thể leak
 - Player disconnect không cleanup hết state
@@ -1363,7 +1565,7 @@ void add_stroke(Room* room, const Stroke* stroke) {
 }
 ```
 
-#### 9.5.2. Buffer Overflows ⚠️
+#### 9.7.2. Buffer Overflows ⚠️
 **Potential issues:**
 - Username không check length trước copy
 - Chat messages có thể vượt MAX_CHAT_LEN
@@ -1387,9 +1589,9 @@ bool validate_room_code(const char* code) {
 }
 ```
 
-### 9.6. Performance Issues
+### 9.8. Performance Issues
 
-#### 9.6.1. Broadcasting Overhead ⚠️
+#### 9.8.1. Broadcasting Overhead ⚠️
 **Issue:**
 - Mỗi stroke broadcast riêng lẻ
 - Với fast drawing, có thể gửi 100+ strokes/second
@@ -1414,7 +1616,7 @@ void add_stroke_to_batch(StrokeBatch* batch, const Stroke* stroke) {
 }
 ```
 
-#### 9.6.2. JSON Parsing ⚠️
+#### 9.8.2. JSON Parsing ⚠️
 **Issue:**
 - Custom JSON parsing với string operations
 - Không efficient cho large messages
@@ -1476,14 +1678,24 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 **C Programming:**
 - Memory management
 - Pointer manipulation
-- Cross-platform development
+- Cross-platform development (.dylib/.so)
 - Build systems (Makefile)
+- Shared library compilation
+- ctypes integration
 
-**Web Development:**
-- Canvas API
-- WebSocket client
-- Event-driven JavaScript
-- Responsive CSS
+**Python Programming:**
+- Pygame framework
+- Event-driven programming
+- ctypes FFI (Foreign Function Interface)
+- JSON serialization
+- Non-blocking I/O
+
+**Game Development:**
+- Game loop design (60 FPS)
+- State machine implementation
+- Real-time rendering
+- Input handling
+- UI component design
 
 ### 10.3. Hạn chế và cải tiến
 
@@ -1493,49 +1705,84 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 3. Thiếu mutex protection ở một số race conditions
 4. Memory leaks potential chưa fully test
 5. Performance chưa optimize cho scale lớn
+6. Pygame client single-threaded (blocking receive)
 
 **Hướng phát triển:**
-1. **Scalability:**
+1. **Architecture:**
+   - Multi-threaded Pygame client
+   - Async network I/O
+   - Event-driven message handling
+   - Separate render thread
+
+2. **Scalability:**
    - Implement room sharding
    - Load balancing với multiple servers
    - Redis cho shared state
    - Database persistence
 
-2. **Security:**
+3. **Security:**
    - Authentication system
    - Rate limiting
    - Input validation
-   - SQL injection prevention
+   - Secure session tokens
 
-3. **Features:**
+4. **Features:**
    - Spectator mode
    - Undo drawing
    - Hint system
-   - Advanced scoring
+   - Advanced scoring (drawer points)
    - Player profiles
    - Leaderboards
+   - Custom word lists
+   - Drawing time limit options
 
-4. **Performance:**
+5. **Performance:**
    - Stroke batching
-   - Binary protocol
+   - Binary protocol (if needed)
    - cJSON library
    - Connection pooling
+   - Optimized canvas rendering
 
-5. **DevOps:**
+6. **DevOps:**
    - Docker containerization
    - CI/CD pipeline
+   - Monitoring (logs analysis)
+   - Automated testing
    - Monitoring (Prometheus)
    - Logging aggregation
 
 ### 10.4. Tổng kết
 
 Scribble project đã successfully implement một multiplayer game hoàn chỉnh với:
-- **2000+ lines** of C code (server + proxy)
-- **1000+ lines** of JavaScript (web UI)
-- **4 concurrent threads** trong client proxy
-- **3 network protocols** (HTTP, TCP, WebSocket)
+- **2000+ lines** of C code (server + networking library)
+- **800+ lines** of Python code (Pygame client)
+- **2 concurrent threads** (TCP server + Timer)
+- **1 network protocol** (TCP với JSON, simplified từ TCP/UDP/WebSocket)
 - **30+ message types** cho game communication
 - **10+ features** hoàn chỉnh
+
+**Major Architectural Decisions:**
+1. ✅ **Migration từ Web UI sang Pygame:** Simplified deployment, better performance
+2. ✅ **Complete UDP reversion:** TCP-only approach, KISS principle
+3. ✅ **C networking library:** Reusable, cross-platform, efficient
+4. ✅ **ctypes integration:** Clean Python-C bridge
+5. ✅ **JSON protocol:** Simple, debuggable, maintainable
+
+**Technical Achievements:**
+- Low-level socket programming (Berkeley sockets)
+- Multi-threaded server với select() multiplexing
+- Cross-platform shared library compilation
+- Foreign Function Interface (ctypes)
+- Real-time game synchronization
+- State machine implementation
+- Event-driven architecture
+
+**Lessons Learned:**
+1. **Simplicity wins:** TCP-only đơn giản hơn và đủ tốt
+2. **Premature optimization is evil:** UDP không cần thiết cho use case này
+3. **Debug-ability matters:** JSON > Binary cho development
+4. **Architecture evolution:** OK để pivot khi design không work
+5. **Testing is crucial:** Real-world testing exposed many issues
 
 Project demonstrate understanding của:
 - Low-level network programming
@@ -1543,8 +1790,9 @@ Project demonstrate understanding của:
 - System architecture design
 - Real-time synchronization
 - Cross-platform development
+- Game development fundamentals
 
-Đây là foundation tốt để phát triển thành production-ready game server với proper testing, security, và scalability.
+Đây là foundation tốt để phát triển thành production-ready game server với proper testing, security, và scalability. Codebase hiện tại clean, maintainable, và ready cho future enhancements.
 
 ---
 
@@ -1552,41 +1800,76 @@ Project demonstrate understanding của:
 
 ### A. Cấu trúc File quan trọng
 
-**server/protocol.h** - Core data structures
+**server/protocol.h** - Core data structures và message types
 **server/game/game_logic.c** - Game mechanics
 **server/tcp/tcp_handler.c** - Message handlers
-**client_proxy/threads/dispatcher.c** - Message routing
-**webui/main.js** - Game controller
+**server/tcp/tcp_server.c** - TCP server với select()
+**client_c/network.c** - C networking library
+**client_pygame/main.py** - Pygame game client
+**client_pygame/network_wrapper.py** - ctypes wrapper
+**client_pygame/protocol.py** - Message type definitions
 
 ### B. Message Flow Diagrams
 
-Xem ARCHITECTURE_DIAGRAM.txt cho chi tiết
+Xem Section 6.3 cho chi tiết Complete Game Flow
 
 ### C. Build và Run
 
 ```bash
 # Build all
-make clean && make all && make install
+make clean && make all
 
-# Run server + proxy
-make run
+# Run server
+make run-server
+# Or: ./build/scribble_server
 
-# Stop all
-make stop
+# Run client (in separate terminal)
+make run-client
+# Or: python3 client_pygame/main.py
+
+# Run client with custom host/port
+python3 client_pygame/main.py --host 192.168.1.2 --port 9090
+
+# Stop server
+Ctrl+C hoặc make stop
 ```
 
 ### D. Testing Checklist
 
 - [ ] 2 players can join và play
 - [ ] 5 players full room
-- [ ] Drawing syncs correctly
-- [ ] All colors work
-- [ ] Guessing awards points
-- [ ] Timer counts down
+- [ ] Drawing syncs correctly via TCP
+- [ ] All 10 colors work
+- [ ] Brush size changes work
+- [ ] Guessing awards points correctly
+- [ ] Timer counts down properly
 - [ ] Game ends with rankings
-- [ ] Private room works
-- [ ] Player disconnect handled
-- [ ] Reconnection restores state
+- [ ] Private room works with code
+- [ ] Player disconnect handled gracefully
+- [ ] Reconnection restores state (partial)
+- [ ] Remote connection works (LAN)
+- [ ] Clear canvas works
+- [ ] Chat messages appear
+- [ ] Drawing tools show/hide per turn
+
+### E. Deprecated Components
+
+**deprecated/udp/** - UDP implementation files (removed Dec 2024)
+- `udp_server.c/.h` - UDP server (41-byte binary protocol)
+- `udp_broadcast.c/.h` - UDP broadcasting logic
+- **Reason:** Reverted to TCP-only for simplicity
+
+**deprecated/client_proxy/** - WebSocket proxy (removed Dec 2024)
+- Multi-threaded WebSocket bridge
+- **Reason:** Migrated to direct Pygame client
+
+**deprecated/server_http/** - HTTP server (removed Dec 2024)
+- Static file serving
+- **Reason:** No longer needed without Web UI
+
+**deprecated/webui/** - Web frontend (removed Dec 2024)
+- HTML/CSS/JavaScript client
+- **Reason:** Replaced with Pygame client
 
 ---
 

@@ -5,10 +5,10 @@
 #include "protocol.h"
 #include "tcp/tcp_server.h"
 #include "tcp/tcp_handler.h"
-#include "udp/udp_server.h"
 #include "game/game_logic.h"
 #include "game/matchmaking.h"
 #include "game/reconnection.h"
+#include "game/stats.h"
 #include "utils/logger.h"
 #include "utils/timer.h"
 
@@ -80,17 +80,12 @@ int main(int argc, char* argv[]) {
     init_reconnection();
     printf("[SERVER] Reconnection system initialized\n");
     
+    init_stats_system();
+    printf("[SERVER] Player stats system initialized\n");
+    
     // Start TCP server
     if (tcp_server_start(TCP_PORT) < 0) {
         fprintf(stderr, "[ERROR] Failed to start TCP server\n");
-        logger_close();
-        return 1;
-    }
-    
-    // Start UDP server
-    if (udp_server_start(UDP_PORT) < 0) {
-        fprintf(stderr, "[ERROR] Failed to start UDP server\n");
-        tcp_server_stop();
         logger_close();
         return 1;
     }
@@ -103,7 +98,6 @@ int main(int argc, char* argv[]) {
     printf("║      Server is running successfully!     ║\n");
     printf("╠══════════════════════════════════════════╣\n");
     printf("║  TCP (Game):    port %d                 ║\n", TCP_PORT);
-    printf("║  UDP (Drawing): port %d                 ║\n", UDP_PORT);
     printf("╚══════════════════════════════════════════╝\n\n");
     printf("[SERVER] Press Ctrl+C to stop\n\n");
     
@@ -115,7 +109,6 @@ int main(int argc, char* argv[]) {
     // Cleanup
     printf("\n[SERVER] Shutting down...\n");
     
-    udp_server_stop();
     tcp_server_stop();
     
     pthread_join(timer_tid, NULL);

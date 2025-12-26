@@ -24,14 +24,11 @@ except OSError as e:
     raise
 
 # Define C function signatures
-_network_lib.network_connect.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+_network_lib.network_connect.argtypes = [ctypes.c_char_p, ctypes.c_int]
 _network_lib.network_connect.restype = ctypes.c_int
 
 _network_lib.network_send_tcp.argtypes = [ctypes.c_char_p]
 _network_lib.network_send_tcp.restype = ctypes.c_int
-
-_network_lib.network_send_udp.argtypes = [ctypes.c_char_p]
-_network_lib.network_send_udp.restype = ctypes.c_int
 
 _network_lib.network_is_connected.argtypes = []
 _network_lib.network_is_connected.restype = ctypes.c_int
@@ -79,10 +76,10 @@ class NetworkClient:
         except Exception as e:
             print(f"[Network] Callback error: {e}")
     
-    def connect(self, host: str = 'localhost', tcp_port: int = 9090, udp_port: int = 9091) -> bool:
+    def connect(self, host: str = 'localhost', tcp_port: int = 9090) -> bool:
         """Connect to server"""
         host_bytes = host.encode('utf-8')
-        result = _network_lib.network_connect(host_bytes, tcp_port, udp_port)
+        result = _network_lib.network_connect(host_bytes, tcp_port)
         
         if result == 0:
             self.connected = True
@@ -103,18 +100,6 @@ class NetworkClient:
         json_bytes = json_str.encode('utf-8')
         
         result = _network_lib.network_send_tcp(json_bytes)
-        return result == 0
-    
-    def send_udp(self, msg_type: int, data: Dict[Any, Any]) -> bool:
-        """Send message via UDP (for drawing strokes)"""
-        if not self.is_connected():
-            return False
-        
-        message = {'type': msg_type, 'data': data}
-        json_str = json.dumps(message)
-        json_bytes = json_str.encode('utf-8')
-        
-        result = _network_lib.network_send_udp(json_bytes)
         return result == 0
     
     def register_handler(self, msg_type: int, handler: Callable):

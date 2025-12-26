@@ -22,7 +22,7 @@ typedef void (*message_callback_t)(const char* message_json);
  * Initialize and connect to server
  * Returns: 0 on success, -1 on failure
  */
-int network_connect(const char* host, int tcp_port, int udp_port);
+int network_connect(const char* host, int tcp_port);
 
 /**
  * Send message via TCP (reliable, for game logic)
@@ -30,13 +30,6 @@ int network_connect(const char* host, int tcp_port, int udp_port);
  * Returns: 0 on success, -1 on failure
  */
 int network_send_tcp(const char* message_json);
-
-/**
- * Send message via UDP (fast, for drawing strokes)
- * message_json: null-terminated JSON string
- * Returns: 0 on success, -1 on failure
- */
-int network_send_udp(const char* message_json);
 
 /**
  * Register callback for received messages

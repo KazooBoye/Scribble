@@ -169,7 +169,7 @@ class DrawingCanvas:
 
 
 class ScribbleGame:
-    def __init__(self, host='localhost', tcp_port=9090, udp_port=9091):
+    def __init__(self, host='localhost', tcp_port=9090):
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         pygame.display.set_caption("Scribble - Drawing & Guessing Game")
         self.clock = pygame.time.Clock()
@@ -186,11 +186,12 @@ class ScribbleGame:
         # Server config
         self.server_host = host
         self.server_tcp_port = tcp_port
-        self.server_udp_port = udp_port
         
         # Game state
         self.state = STATE_LANDING
         self.connected = False
+        self.reconnecting = False
+        self.last_ping_time = pygame.time.get_ticks()
         self.username = ""
         self.player_id = None
         self.session_token = None
@@ -234,7 +235,7 @@ class ScribbleGame:
         self.network = NetworkClient()
         self.setup_network_handlers()
         
-        if self.network.connect(self.server_host, self.server_tcp_port, self.server_udp_port):
+        if self.network.connect(self.server_host, self.server_tcp_port):
             self.connected = True
             self.status_message = f"Connected to {self.server_host}!"
         else:
@@ -264,12 +265,15 @@ class ScribbleGame:
         self.network.register_handler(MSG_TYPE.ROUND_END, self.handle_round_end)
         self.network.register_handler(MSG_TYPE.GAME_END, self.handle_game_end)
         self.network.register_handler(MSG_TYPE.SCORE_UPDATE, self.handle_score_update)
+        self.network.register_handler(MSG_TYPE.RECONNECT_SUCCESS, self.handle_reconnect_success)
+        self.network.register_handler(MSG_TYPE.RECONNECT_FAIL, self.handle_reconnect_fail)
         self.network.register_handler(MSG_TYPE.ERROR, self.handle_error)
     
     # Message handlers
     def handle_ping(self, data):
         """Respond to server ping with pong"""
         self.network.send_tcp(MSG_TYPE.PONG, {})
+        self.last_ping_time = pygame.time.get_ticks()
     
     def handle_register_ack(self, data):
         self.player_id = data.get('player_id')
@@ -314,31 +318,41 @@ class ScribbleGame:
         self.players = data.get('players', [])
         self.canvas.clear()
         self.countdown = 0
+        self.canvas.enabled = False
+        self.is_drawer = False
+        self.word_to_draw = ""
         
-        drawer_id = data.get('drawer_id')
-        self.is_drawer = (drawer_id == self.player_id)
+        # Find if current player is the drawer
+        for player_data in self.players:
+            if player_data.get('player_id') == self.player_id and player_data.get('is_drawing'):
+                self.is_drawer = True
+                self.canvas.enabled = True
+                if 'word' in data: # Word to draw is only sent to the drawer
+                    self.word_to_draw = data['word']
+                break
         
-        if self.is_drawer and 'word' in data:
-            self.word_to_draw = data['word']
-            self.canvas.enabled = True
-        
-        print(f"[Game] Game started - Round {self.round_number}/{self.total_rounds}")
+        print(f"[Game] Game started - Round {self.round_number}/{self.total_rounds}, is_drawer: {self.is_drawer}, canvas enabled: {self.canvas.enabled}")
     
     def handle_round_start(self, data):
         self.round_number = data.get('round', self.round_number)
         self.total_rounds = data.get('total_rounds', self.total_rounds)
         self.word_mask = data.get('word_mask', '_ _ _ _')
+        self.players = data.get('players', self.players)  # Update players list
         self.canvas.clear()
         self.canvas.enabled = False
         self.is_drawer = False
         self.word_to_draw = ""
         
-        drawer_id = data.get('drawer_id')
-        self.is_drawer = (drawer_id == self.player_id)
+        # Find if current player is the drawer
+        for player_data in self.players:
+            if player_data.get('player_id') == self.player_id and player_data.get('is_drawing'):
+                self.is_drawer = True
+                self.canvas.enabled = True
+                if 'word' in data: # Word to draw is only sent to the drawer
+                    self.word_to_draw = data['word']
+                break
         
-        if self.is_drawer and 'word' in data:
-            self.word_to_draw = data['word']
-            self.canvas.enabled = True
+        print(f"[Game] Round {self.round_number} started - is_drawer: {self.is_drawer}, canvas enabled: {self.canvas.enabled}")
     
     def handle_your_turn(self, data):
         self.is_drawer = True
@@ -357,10 +371,7 @@ class ScribbleGame:
         print(f"[Chat] {username}: {message}")
     
     def handle_draw_stroke(self, data):
-        player_id = data.get('player_id')
-        if player_id == self.player_id:
-            return
-        
+        # Server already excludes sender from broadcast, no need to check player_id
         x1 = data.get('x1', 0)
         y1 = data.get('y1', 0)
         x2 = data.get('x2', 0)
@@ -369,6 +380,7 @@ class ScribbleGame:
         thickness = data.get('thickness', 3)
         
         self.canvas.draw_stroke(x1, y1, x2, y2, color_idx, thickness)
+        print(f"[Game] Drawing stroke: ({x1:.1f},{y1:.1f}) -> ({x2:.1f},{y2:.1f}) color={color_idx}")
     
     def handle_clear_canvas(self, data):
         self.canvas.clear()
@@ -397,7 +409,9 @@ class ScribbleGame:
         self.players = data.get('players', self.players)
         self.chat_messages.append(f"* Round ended! Word: {word}")
         self.word_to_draw = ""
+        self.is_drawer = False
         self.canvas.enabled = False
+        print(f"[Game] Round ended - canvas disabled, is_drawer: {self.is_drawer}")
     
     def handle_game_end(self, data):
         self.state = STATE_ENDED
@@ -434,6 +448,37 @@ class ScribbleGame:
     def handle_error(self, data):
         error_msg = data.get('message', 'Error')
         self.status_message = f"Error: {error_msg}"
+    
+    def handle_reconnect_success(self, data):
+        """Handle successful reconnection"""
+        print("[Game] Reconnection successful!")
+        self.connected = True
+        self.status_message = "Reconnected successfully!"
+        
+        # Restore game state from server
+        if 'room_id' in data:
+            self.handle_room_joined(data)
+        if 'players' in data:
+            self.players = data.get('players', [])
+        if 'state' in data:
+            # Restore game state
+            state_str = data.get('state', 'WAITING')
+            if state_str == 'PLAYING':
+                self.state = STATE_PLAYING
+            elif state_str == 'WAITING':
+                self.state = STATE_WAITING
+        
+        print(f"[Game] Game state restored. Room: {self.room_id}, State: {self.state}")
+    
+    def handle_reconnect_fail(self, data):
+        """Handle failed reconnection"""
+        error = data.get('error', 'Unknown error')
+        print(f"[Game] Reconnection failed: {error}")
+        self.status_message = f"Reconnection failed: {error}"
+        self.session_token = None  # Clear invalid token
+        
+        # Return to landing page
+        self.state = STATE_LANDING
     
     # User actions
     def register_and_play_now(self):
@@ -778,8 +823,48 @@ class ScribbleGame:
         # Return button
         self.btn_return_home.draw(self.screen, self.font_medium)
     
+    def try_reconnect(self):
+        """Attempt to reconnect to server with session token"""
+        if not self.session_token or self.reconnecting:
+            return
+        
+        print("[Game] Connection lost, attempting to reconnect...")
+        self.reconnecting = True
+        self.status_message = "Reconnecting..."
+        
+        # Try to reconnect
+        if self.network.connect(self.server_host, self.server_tcp_port):
+            # Send reconnect request with session token
+            self.network.send_tcp(MSG_TYPE.RECONNECT_REQUEST, {
+                'session_token': self.session_token
+            })
+            print(f"[Game] Sent reconnect request with token: {self.session_token}")
+        else:
+            print("[Game] Failed to reconnect to server")
+            self.reconnecting = False
+            self.connected = False
+            self.status_message = "Connection lost. Returning to menu..."
+            pygame.time.wait(2000)
+            self.return_to_home()
+    
+    def check_connection(self):
+        """Check if connection is alive and attempt reconnect if needed"""
+        current_time = pygame.time.get_ticks()
+        
+        # If we're in-game and lost connection
+        if self.state in [STATE_WAITING, STATE_PLAYING] and not self.connected:
+            if not self.reconnecting and self.session_token:
+                self.try_reconnect()
+        
+        # Update ping time
+        if self.connected and current_time - self.last_ping_time > 30000:  # 30 seconds
+            self.last_ping_time = current_time
+    
     def run(self):
         while self.running:
+            # Network messages are handled via C callbacks automatically
+            # Just check connection health
+            self.check_connection()
             self.handle_events()
             self.render()
             self.clock.tick(FPS)
@@ -794,8 +879,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Scribble Game Client')
     parser.add_argument('--host', default='localhost', help='Server IP')
     parser.add_argument('--tcp-port', type=int, default=9090, help='TCP port')
-    parser.add_argument('--udp-port', type=int, default=9091, help='UDP port')
     args = parser.parse_args()
     
-    game = ScribbleGame(host=args.host, tcp_port=args.tcp_port, udp_port=args.udp_port)
+    game = ScribbleGame(host=args.host, tcp_port=args.tcp_port)
     game.run()

@@ -6,6 +6,7 @@
 #include "../game/matchmaking.h"
 #include "../game/game_logic.h"
 #include "../game/reconnection.h"
+#include "../game/stats.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,8 +59,14 @@ void handle_register(Player* player, const char* json) {
     player->state = PLAYER_LOBBY;
     player->score = 0;
     player->last_seen = get_current_time_ms();
+    player->correct_guesses_this_game = 0;
+    player->rounds_drawn_this_game = 0;
     
     generate_session_token(player->session_token, player->player_id);
+    
+    // Load player stats (for future features like displaying stats in UI)
+    PlayerStats stats;
+    load_player_stats(username, &stats);
     
     printf("[TCP] Registered player %u: %s (fd=%d)\n", player->player_id, username, player->fd);
     
@@ -81,10 +88,35 @@ void handle_ping(Player* player) {
     send_tcp_message(player->fd, MSG_PONG, response);
 }
 
-void handle_join_room(Player* player) {
-    printf("[TCP] Player %u (%s) joining room\n", player->player_id, player->username);
+void handle_join_room(Player* player, const char* json) {
+    printf("[TCP] Player %u (%s) joining room, json=%s\n", player->player_id, player->username, json);
     
-    if (join_matchmaking(player) == 0) {
+    // Check if a room_code is provided (private room)
+    char room_code[16];
+    int result;
+    
+    if (json_get_data_string(json, "room_code", room_code, sizeof(room_code)) == 0) {
+        // Joining private room by code
+        printf("[TCP] Player %u attempting to join private room with code: %s\n", 
+               player->player_id, room_code);
+        result = join_private_room(player, room_code);
+        
+        if (result == -1) {
+            printf("[TCP] Room not found: %s\n", room_code);
+            send_tcp_message(player->fd, MSG_ROOM_NOT_FOUND, "{\"error\":\"Room not found\"}");
+            return;
+        } else if (result == -2) {
+            printf("[TCP] Room is full: %s\n", room_code);
+            send_tcp_message(player->fd, MSG_ROOM_FULL, "{\"error\":\"Room is full\"}");
+            return;
+        }
+    } else {
+        // Auto matchmaking (public room)
+        printf("[TCP] Player %u using auto matchmaking\n", player->player_id);
+        result = join_matchmaking(player);
+    }
+    
+    if (result == 0) {
         Room* room = get_player_room(player);
         printf("[TCP] Player %u joined room %u (now %d players)\n", 
                player->player_id, room ? room->room_id : 0, room ? room->player_count : 0);
@@ -347,7 +379,7 @@ void handle_tcp_message(Player* player, const char* buffer, int len) {
             handle_ping(player);
             break;
         case MSG_JOIN_ROOM:
-            handle_join_room(player);
+            handle_join_room(player, json);
             break;
         case MSG_CREATE_ROOM:
             handle_create_room(player);
