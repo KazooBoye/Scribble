@@ -234,6 +234,10 @@ class ScribbleGame:
         # Clear button
         self.btn_clear = Button(CANVAS_X + CANVAS_WIDTH - 120, CANVAS_Y - 45, 110, 35, "Clear", RED, WHITE)
         
+        # Brush size buttons
+        self.btn_brush_minus = Button(CANVAS_X + 480, CANVAS_Y - 45, 30, 35, "-", GRAY, BLACK)
+        self.btn_brush_plus = Button(CANVAS_X + 515, CANVAS_Y - 45, 30, 35, "+", GRAY, BLACK)
+        
         # Host controls (for waiting room) - positioned in left sidebar
         self.btn_start_game = Button(10, 500, SIDEBAR_WIDTH - 20, 45, "Start Game", GREEN)
         
@@ -243,12 +247,14 @@ class ScribbleGame:
         
         if self.network.connect(self.server_host, self.server_tcp_port):
             self.connected = True
+            self.last_ping_time = pygame.time.get_ticks()  # Initialize ping timer
             self.status_message = f"Connected to {self.server_host}!"
         else:
             self.status_message = f"Failed to connect to {self.server_host}"
     
     def setup_network_handlers(self):
         self.network.register_handler(MSG_TYPE.PING, self.handle_ping)
+        self.network.register_handler(MSG_TYPE.PONG, self.handle_pong)
         self.network.register_handler(MSG_TYPE.REGISTER_ACK, self.handle_register_ack)
         self.network.register_handler(MSG_TYPE.ROOM_CREATED, self.handle_room_created)
         self.network.register_handler(MSG_TYPE.ROOM_JOINED, self.handle_room_joined)
@@ -278,9 +284,19 @@ class ScribbleGame:
     
     # Message handlers
     def handle_ping(self, data):
-        """Respond to server ping with pong"""
+        """Respond to server ping with pong (if server sends PING)"""
         self.network.send_tcp(MSG_TYPE.PONG, {})
         self.last_ping_time = pygame.time.get_ticks()
+        print("[Game] Received PING from server, sent PONG")
+    
+    def handle_pong(self, data):
+        """Handle PONG response from server"""
+        self.last_ping_time = pygame.time.get_ticks()
+        # Restore connection status if we were disconnected
+        if not self.connected:
+            print("[Game] Received PONG, connection restored")
+            self.connected = True
+            self.status_message = "Reconnected!"
     
     def handle_register_ack(self, data):
         self.player_id = data.get('player_id')
@@ -463,22 +479,46 @@ class ScribbleGame:
         """Handle successful reconnection"""
         print("[Game] Reconnection successful!")
         self.connected = True
+        self.reconnecting = False
+        self.last_ping_time = pygame.time.get_ticks()  # Reset ping timer
         self.status_message = "Reconnected successfully!"
         
-        # Restore game state from server
-        if 'room_id' in data:
-            self.handle_room_joined(data)
-        if 'players' in data:
-            self.players = data.get('players', [])
-        if 'state' in data:
-            # Restore game state
-            state_str = data.get('state', 'WAITING')
-            if state_str == 'PLAYING':
-                self.state = STATE_PLAYING
-            elif state_str == 'WAITING':
-                self.state = STATE_WAITING
+        # Restore room info
+        self.room_id = data.get('room_id')
+        self.room_code = data.get('room_code', '')
+        self.is_private_room = bool(self.room_code)
         
-        print(f"[Game] Game state restored. Room: {self.room_id}, State: {self.state}")
+        # Restore player list
+        self.players = data.get('players', [])
+        
+        # Restore game state
+        state_str = data.get('state', 'WAITING')
+        if state_str == 'PLAYING':
+            self.state = STATE_PLAYING
+            # Restore playing state details
+            self.round_number = data.get('round', 1)
+            self.total_rounds = data.get('total_rounds', 3)
+            self.word_mask = data.get('word_mask', '_ _ _ _')
+            self.timer = data.get('time_remaining', 0)
+            
+            # Check if we're the drawer
+            self.is_drawer = False
+            self.canvas.enabled = False
+            for player_data in self.players:
+                if player_data.get('player_id') == self.player_id and player_data.get('is_drawing'):
+                    self.is_drawer = True
+                    self.canvas.enabled = True
+                    if 'word' in data:
+                        self.word_to_draw = data['word']
+                    break
+            
+            print(f"[Game] Restored PLAYING state - Round {self.round_number}/{self.total_rounds}, is_drawer: {self.is_drawer}")
+        else:
+            self.state = STATE_WAITING
+            self.status_message = "Reconnected - Waiting for game to start..."
+            print("[Game] Restored WAITING state")
+        
+        print(f"[Game] Game state fully restored. Room: {self.room_id}, State: {self.state}, Players: {len(self.players)}")
     
     def handle_reconnect_fail(self, data):
         """Handle failed reconnection"""
@@ -551,8 +591,13 @@ class ScribbleGame:
             self.network.send_tcp(MSG_TYPE.UDP_CLEAR_CANVAS, {})
     
     def return_to_home(self):
+        # Clear all session state to force fresh registration
         self.state = STATE_LANDING
         self.room_id = None
+        self.player_id = None  # Clear player ID
+        self.session_token = None  # Clear session token
+        self.username = ""  # Clear username to force re-entry
+        self.username_input.text = ""  # Clear input box
         self.is_host = False
         self.is_private_room = False
         self.players = []
@@ -560,7 +605,19 @@ class ScribbleGame:
         self.canvas.clear()
         self.canvas.enabled = False
         self.chat_input = ""
-        self.status_message = "Connected!"
+        self.is_drawer = False
+        self.word_to_draw = ""
+        self.word_mask = "_ _ _ _"
+        self.timer = 0
+        self.countdown = 0
+        self.round_number = 0
+        self.total_rounds = 0
+        self.reconnecting = False
+        # Set appropriate status message based on connection
+        if self.connected:
+            self.status_message = "Ready to play!"
+        else:
+            self.status_message = "Disconnected - Please reconnect"
     
     def start_game_early(self):
         """Host starts game early (if enough players)"""
@@ -627,6 +684,14 @@ class ScribbleGame:
                         for i, rect in enumerate(self.color_buttons):
                             if rect.collidepoint(event.pos):
                                 self.canvas.set_color(i)
+                        
+                        # Brush size controls
+                        if self.btn_brush_minus.handle_event(event):
+                            if self.canvas.line_width > 2:
+                                self.canvas.line_width -= 1
+                        if self.btn_brush_plus.handle_event(event):
+                            if self.canvas.line_width < 20:
+                                self.canvas.line_width += 1
                 
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     self.canvas.handle_mouse_up(event.pos)
@@ -639,6 +704,8 @@ class ScribbleGame:
                     self.canvas.handle_mouse_move(event.pos, self.network)
                     if self.is_drawer:
                         self.btn_clear.handle_event(event)
+                        self.btn_brush_minus.handle_event(event)
+                        self.btn_brush_plus.handle_event(event)
                 
                 elif event.type == pygame.KEYDOWN:
                     if self.state == STATE_WAITING or (self.state == STATE_PLAYING and not self.is_drawer):
@@ -701,6 +768,18 @@ class ScribbleGame:
     def render_game(self):
         # Left sidebar - Players
         self.render_players()
+        
+        # Connection status warning (if disconnected)
+        if not self.connected:
+            # Semi-transparent red overlay at top
+            warning_surface = pygame.Surface((WINDOW_WIDTH, 50))
+            warning_surface.set_alpha(200)
+            warning_surface.fill(RED)
+            self.screen.blit(warning_surface, (0, 0))
+            
+            warning_text = self.font_medium.render("⚠ CONNECTION LOST - Attempting to reconnect...", True, WHITE)
+            warning_rect = warning_text.get_rect(center=(WINDOW_WIDTH // 2, 25))
+            self.screen.blit(warning_text, warning_rect)
         
         # Top info bar
         y = 20
@@ -833,9 +912,13 @@ class ScribbleGame:
         # Clear button
         self.btn_clear.draw(self.screen, self.font_small)
         
-        # Brush size
-        brush_text = self.font_small.render(f"Brush: {self.canvas.line_width}px", True, BLACK)
-        self.screen.blit(brush_text, (CANVAS_X + 430, y + 10))
+        # Brush size controls
+        self.btn_brush_minus.draw(self.screen, self.font_medium)
+        self.btn_brush_plus.draw(self.screen, self.font_medium)
+        
+        # Brush size display
+        brush_text = self.font_small.render(f"{self.canvas.line_width}px", True, BLACK)
+        self.screen.blit(brush_text, (CANVAS_X + 555, y + 10))
         
         # Color palette
         for i, color in enumerate(COLORS[:10]):
@@ -949,6 +1032,8 @@ class ScribbleGame:
         
         # Try to reconnect
         if self.network.connect(self.server_host, self.server_tcp_port):
+            self.connected = True
+            self.last_ping_time = pygame.time.get_ticks()  # Reset ping timer
             # Send reconnect request with session token
             self.network.send_tcp(MSG_TYPE.RECONNECT_REQUEST, {
                 'session_token': self.session_token
@@ -957,23 +1042,45 @@ class ScribbleGame:
         else:
             print("[Game] Failed to reconnect to server")
             self.reconnecting = False
-            self.connected = False
-            self.status_message = "Connection lost. Returning to menu..."
-            pygame.time.wait(2000)
-            self.return_to_home()
+            self.status_message = "Connection lost - Unable to reconnect"
     
     def check_connection(self):
-        """Check if connection is alive and attempt reconnect if needed"""
+        """Check connection by sending periodic PING and detecting timeout"""
         current_time = pygame.time.get_ticks()
         
-        # If we're in-game and lost connection
+        # Send PING every 5 seconds when connected
+        ping_interval = 5000  # 5 seconds
+        if self.connected and (current_time - self.last_ping_time > ping_interval):
+            print("[Game] Sending PING to server")
+            result = self.network.send_tcp(MSG_TYPE.PING, {})
+            if not result:
+                # Send failed - connection is dead
+                print("[Game] PING send failed - connection dead")
+                self.connected = False
+                self.status_message = "Connection lost!"
+        
+        # Check PONG timeout (if no response for 15 seconds, connection is dead)
+        ping_timeout = 15000  # 15 seconds
+        if self.connected and (current_time - self.last_ping_time > ping_timeout):
+            print(f"[Game] Connection lost! No PONG response for {ping_timeout/1000}s")
+            self.connected = False
+            self.status_message = "Connection lost!"
+        
+        # If we're in-game and lost connection, try to reconnect
         if self.state in [STATE_WAITING, STATE_PLAYING] and not self.connected:
             if not self.reconnecting and self.session_token:
                 self.try_reconnect()
-        
-        # Update ping time
-        if self.connected and current_time - self.last_ping_time > 30000:  # 30 seconds
-            self.last_ping_time = current_time
+            elif self.reconnecting:
+                # Keep trying to reconnect every 3 seconds
+                reconnect_retry_interval = 3000
+                if not hasattr(self, 'last_reconnect_attempt'):
+                    self.last_reconnect_attempt = 0
+                
+                if current_time - self.last_reconnect_attempt > reconnect_retry_interval:
+                    self.last_reconnect_attempt = current_time
+                    print("[Game] Retrying reconnection...")
+                    self.reconnecting = False  # Reset to try again
+                    self.try_reconnect()
     
     def run(self):
         while self.running:

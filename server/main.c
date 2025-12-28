@@ -39,6 +39,9 @@ void* timer_thread(void* arg) {
         // Update timers for all active rooms
         iterate_active_rooms(timer_update_callback);
         
+        // Check for inactive players and save their state
+        check_inactive_players();
+        
         // Cleanup expired states
         cleanup_expired_states();
     }
