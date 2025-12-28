@@ -7,7 +7,6 @@
 #include "tcp/tcp_handler.h"
 #include "game/game_logic.h"
 #include "game/matchmaking.h"
-#include "game/reconnection.h"
 #include "game/stats.h"
 #include "utils/logger.h"
 #include "utils/timer.h"
@@ -38,12 +37,6 @@ void* timer_thread(void* arg) {
         
         // Update timers for all active rooms
         iterate_active_rooms(timer_update_callback);
-        
-        // Check for inactive players and save their state
-        check_inactive_players();
-        
-        // Cleanup expired states
-        cleanup_expired_states();
     }
     
     return NULL;
@@ -79,9 +72,6 @@ int main(int argc, char* argv[]) {
     // Initialize game systems
     init_matchmaking();
     printf("[SERVER] Matchmaking system initialized\n");
-    
-    init_reconnection();
-    printf("[SERVER] Reconnection system initialized\n");
     
     init_stats_system();
     printf("[SERVER] Player stats system initialized\n");

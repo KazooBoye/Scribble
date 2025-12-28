@@ -5,7 +5,6 @@
 #include "../utils/timer.h"
 #include "../game/matchmaking.h"
 #include "../game/game_logic.h"
-#include "../game/reconnection.h"
 #include "../game/stats.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -201,56 +200,6 @@ void handle_chat(Player* player, const char* json) {
              "{\"player_id\":%u,\"username\":\"%s\",\"message\":\"%s\"}",
              player->player_id, player->username, message);
     broadcast_to_room(room, MSG_CHAT_BROADCAST, broadcast, NULL);
-}
-
-void handle_reconnect(Player* player, const char* json) {
-    char session_token[64];
-    if (json_get_data_string(json, "session_token", session_token, sizeof(session_token)) < 0) {
-        send_tcp_message(player->fd, MSG_RECONNECT_FAIL, "{\"error\":\"Invalid token\"}");
-        return;
-    }
-    
-    Room* room = NULL;
-    if (restore_player_state(player, session_token, &room) == 0) {
-        // Success
-        char* room_state = json_create_room_state(room);
-        send_tcp_message(player->fd, MSG_RECONNECT_SUCCESS, room_state);
-        free(room_state);
-        
-        // Notify other players
-        char player_info[256];
-        snprintf(player_info, sizeof(player_info),
-                 "{\"player_id\":%u,\"username\":\"%s\"}",
-                 player->player_id, player->username);
-        broadcast_to_room(room, MSG_PLAYER_JOIN, player_info, player);
-        
-        // Resend all strokes to catch up
-        for (int i = 0; i < room->stroke_count; i++) {
-            // Note: Strokes are sent via UDP, but we can trigger resend here
-        }
-    } else {
-        send_tcp_message(player->fd, MSG_RECONNECT_FAIL, 
-                        "{\"error\":\"Reconnection failed\"}");
-    }
-}
-
-void handle_disconnect(Player* player) {
-    Room* room = get_player_room(player);
-    if (room && room->state == ROOM_PLAYING) {
-        // Save state for reconnection
-        save_player_state(player, room);
-        
-        // Notify others
-        char player_info[256];
-        snprintf(player_info, sizeof(player_info),
-                 "{\"player_id\":%u,\"username\":\"%s\"}",
-                 player->player_id, player->username);
-        broadcast_to_room(room, MSG_PLAYER_LEAVE, player_info, player);
-    }
-    
-    if (room) {
-        leave_room(player);
-    }
 }
 
 void handle_clear_canvas(Player* player) {
@@ -500,12 +449,6 @@ void handle_tcp_message(Player* player, const char* buffer, int len) {
             break;
         case MSG_CHAT:
             handle_chat(player, json);
-            break;
-        case MSG_RECONNECT_REQUEST:
-            handle_reconnect(player, json);
-            break;
-        case MSG_DISCONNECT:
-            handle_disconnect(player);
             break;
         case MSG_HOST_START_GAME:
             handle_host_start_game(player, json);

@@ -30,15 +30,12 @@ class MSG_TYPE:
     PLAYER_JOIN = 22
     PLAYER_LEAVE = 23
     SCORE_UPDATE = 24
-    RECONNECT_REQUEST = 25
-    RECONNECT_SUCCESS = 26
-    RECONNECT_FAIL = 27
-    ERROR = 28
-    DISCONNECT = 29
+    ERROR = 25
+    DISCONNECT = 26
     
-    # Host control messages (30+)
-    HOST_START_GAME = 30
-    HOST_KICK_PLAYER = 31
+    # Host control messages (27+)
+    HOST_START_GAME = 27
+    HOST_KICK_PLAYER = 28
     
     # UDP Messages
     UDP_STROKE = 100

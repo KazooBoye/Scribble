@@ -1,10 +1,6 @@
 #include "tcp_server.h"
 #include "tcp_handler.h"
 #include "../utils/logger.h"
-#include "../utils/timer.h"
-#include "../game/game_logic.h"
-#include "../game/matchmaking.h"
-#include "../game/reconnection.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -233,52 +229,4 @@ Player* find_player_by_ip(const char* ip) {
         }
     }
     return NULL;
-}
-
-void check_inactive_players() {
-    // Check for players who haven't sent anything for 15 seconds
-    // and save their state if they're in an active game
-    const uint64_t INACTIVITY_THRESHOLD = 15000;  // 15 seconds in ms
-    uint64_t current_time = get_current_time_ms();
-    
-    for (int i = 0; i < player_count; i++) {
-        Player* player = &players[i];
-        if (player->fd <= 0) continue;
-        
-        uint64_t time_since_last_seen = current_time - player->last_seen;
-        
-        // If player is inactive and in a game, save their state
-        if (time_since_last_seen > INACTIVITY_THRESHOLD && 
-            player->state == PLAYER_IN_ROOM) {
-            
-            Room* room = get_player_room(player);
-            if (room && room->state == ROOM_PLAYING) {
-                // Check if we already saved this player's state
-                // by checking if they have a session token saved
-                static uint32_t last_saved_players[100] = {0};
-                static int last_saved_count = 0;
-                
-                bool already_saved = false;
-                for (int j = 0; j < last_saved_count; j++) {
-                    if (last_saved_players[j] == player->player_id) {
-                        already_saved = true;
-                        break;
-                    }
-                }
-                
-                if (!already_saved) {
-                    printf("[TCP] Player %u (%s) inactive for %llums, saving state\n",
-                           player->player_id, player->username, 
-                           (unsigned long long)time_since_last_seen);
-                    
-                    save_player_state(player, room);
-                    
-                    // Mark as saved
-                    if (last_saved_count < 100) {
-                        last_saved_players[last_saved_count++] = player->player_id;
-                    }
-                }
-            }
-        }
-    }
 }
