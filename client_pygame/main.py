@@ -194,7 +194,6 @@ class ScribbleGame:
         self.last_ping_time = pygame.time.get_ticks()
         self.username = ""
         self.player_id = None
-        self.session_token = None
         self.room_id = None
         self.room_code = ""
         self.is_host = False  # Track if player is room host
@@ -297,7 +296,6 @@ class ScribbleGame:
     
     def handle_register_ack(self, data):
         self.player_id = data.get('player_id')
-        self.session_token = data.get('session_token')
         self.username = data.get('username', self.username)
         print(f"[Game] Registered: {self.username} (ID: {self.player_id})")
     
@@ -526,7 +524,6 @@ class ScribbleGame:
         self.state = STATE_LANDING
         self.room_id = None
         self.player_id = None  # Clear player ID
-        self.session_token = None  # Clear session token
         self.username = ""  # Clear username to force re-entry
         self.username_input.text = ""  # Clear input box
         self.is_host = False

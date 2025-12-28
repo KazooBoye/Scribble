@@ -61,8 +61,6 @@ void handle_register(Player* player, const char* json) {
     player->correct_guesses_this_game = 0;
     player->rounds_drawn_this_game = 0;
     
-    generate_session_token(player->session_token, player->player_id);
-    
     // Load player stats (for future features like displaying stats in UI)
     PlayerStats stats;
     load_player_stats(username, &stats);
@@ -71,8 +69,8 @@ void handle_register(Player* player, const char* json) {
     
     char response[512];
     snprintf(response, sizeof(response), 
-             "{\"player_id\":%u,\"username\":\"%s\",\"session_token\":\"%s\"}",
-             player->player_id, player->username, player->session_token);
+             "{\"player_id\":%u,\"username\":\"%s\"}",
+             player->player_id, player->username);
     
     send_tcp_message(player->fd, MSG_REGISTER_ACK, response);
     log_player_event(player->player_id, "registered", username);
@@ -200,6 +198,21 @@ void handle_chat(Player* player, const char* json) {
              "{\"player_id\":%u,\"username\":\"%s\",\"message\":\"%s\"}",
              player->player_id, player->username, message);
     broadcast_to_room(room, MSG_CHAT_BROADCAST, broadcast, NULL);
+}
+
+void handle_disconnect(Player* player) {
+    Room* room = get_player_room(player);
+    if (room) {
+        // Notify others that player left
+        char player_info[256];
+        snprintf(player_info, sizeof(player_info),
+                 "{\"player_id\":%u,\"username\":\"%s\"}",
+                 player->player_id, player->username);
+        broadcast_to_room(room, MSG_PLAYER_LEAVE, player_info, player);
+        
+        // Remove player from room
+        leave_room(player);
+    }
 }
 
 void handle_clear_canvas(Player* player) {
