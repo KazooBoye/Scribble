@@ -31,15 +31,25 @@ Cuối cùng, về persistence và monitoring, hệ thống cần lưu trữ th�
 
 ### 1.3. Kiến trúc tổng quan
 
-Dự án được thiết kế theo mô hình client-server architecture với sự phân tách rõ ràng giữa presentation layer (Pygame client), business logic layer (C server) và một lớp trung gian là C networking library. Server được viết hoàn toàn bằng C11 với POSIX threads để tận dụng tối đa hiệu năng của hệ điều hành, trong khi client sử dụng Python với Pygame framework để tạo giao diện đồ họa 2D. Sự kết nối giữa Python và C networking library được thực hiện thông qua ctypes Foreign Function Interface, cho phép Python code gọi trực tiếp các hàm C đã compile thành shared library.
+Dự án được thiết kế theo mô hình client-server architecture với kiến trúc phân lớp ba tầng ở application level: presentation layer (Pygame client), business logic layer (C server) và networking abstraction layer (C shared library). Cần lưu ý rằng đây là phân lớp trong kiến trúc ứng dụng (application-level architecture), khác với mô hình OSI 7 tầng. Trong mô hình OSI, toàn bộ ba thành phần này đều hoạt động tại tầng Application (Layer 7), trong khi giao tiếp mạng sử dụng TCP protocol tại tầng Transport (Layer 4) được cung cấp bởi hệ điều hành thông qua Berkeley Sockets API.
 
-Một điểm đặc biệt trong kiến trúc là việc tách biệt networking logic thành một shared library độc lập (libscribble_client.dylib trên macOS hoặc .so trên Linux). Library này đóng gói toàn bộ các thao tác socket level như connection management, message framing với 4-byte length prefix và error handling. Điều này không chỉ giúp tái sử dụng code giữa các client platform khác nhau mà còn cách ly các vấn đề về network programming khỏi game logic layer, giúp dễ dàng debug và maintain.
+Server được viết hoàn toàn bằng C11 với POSIX threads để tận dụng tối đa hiệu năng của hệ điều hành, trong khi client sử dụng Python với Pygame framework để tạo giao diện đồ họa 2D. Sự kết nối giữa Python và C networking library được thực hiện thông qua ctypes Foreign Function Interface, cho phép Python code gọi trực tiếp các hàm C đã compile thành shared library.
+
+Một điểm đặc biệt trong kiến trúc là việc tách biệt networking logic thành một shared library độc lập (libscribble_client.dylib trên macOS hoặc .so trên Linux). Library này đóng gói toàn bộ các thao tác socket level như connection management, message framing với 4-byte length prefix và error handling. Điều này không chỉ giúp tái sử dụng code giữa các client platform khác nhau mà còn cách ly các vấn đề về network programming khỏi game logic, giúp dễ dàng debug và maintain.
 
 ---
 
 ## II. PHÂN TÍCH THIẾT KẾ HỆ THỐNG
 
 ### 2.1. Kiến trúc phân lớp
+
+**Vị trí trong mô hình OSI**
+
+Trước khi đi vào chi tiết kiến trúc ứng dụng, cần làm rõ vị trí của hệ thống trong mô hình OSI 7 tầng. Toàn bộ game application (bao gồm client UI, business logic, và data persistence) hoạt động tại tầng Application Layer (Layer 7). Các tầng dưới được hệ điều hành và hardware xử lý: tầng Presentation và Session (Layer 6, 5) được skip trong hầu hết ứng dụng hiện đại, tầng Transport (Layer 4) sử dụng TCP protocol được kernel cung cấp thông qua Berkeley Sockets API, tầng Network (Layer 3) sử dụng IP protocol cho routing, và tầng Data Link/Physical (Layer 2, 1) xử lý Ethernet/WiFi frames và physical signaling.
+
+Khi báo cáo nhắc đến "layers" hay "tầng" trong kiến trúc ứng dụng (presentation layer, business logic layer, data access layer), đây là phân lớp logic bên trong tầng Application của OSI, không phải các tầng riêng biệt trong OSI stack. Việc phân biệt này quan trọng để tránh nhầm lẫn giữa application architecture patterns và network protocol layering.
+
+**Kiến trúc ứng dụng ba thành phần**
 
 Hệ thống được tổ chức theo kiến trúc phân lớp với ba thành phần chính, trong đó server backend được cấu trúc thành nhiều tầng con để tách biệt rõ ràng các trách nhiệm. Mỗi thành phần giao tiếp với nhau thông qua các interface được định nghĩa chặt chẽ.
 
@@ -412,26 +422,29 @@ Testing on multiple platforms ensures compatibility và catches platform-specifi
 
 ### 5.1. I/O multiplexing với select()
 
-Một trong những challenges chính trong network server design là efficiently handling nhiều concurrent connections. Mỗi client maintain một TCP socket connection đến server, và server phải simultaneously monitor tất cả sockets cho incoming data, while also accepting new connections. Traditional approach của spawning một thread per connection quickly becomes impractical khi số lượng clients tăng lên do memory overhead và context switching cost.
+**Cơ chế kiểm soát nhiều máy khách của server**
 
-Hệ thống này sử dụng I/O multiplexing với `select()` system call để address challenge này. Select() là một trong oldest multiplexing mechanisms, được support trên tất cả Unix-like systems và providing portable solution.
+Một trong những thách thức chính trong thiết kế server mạng là xử lý hiệu quả nhiều kết nối đồng thời. Mỗi client duy trì một kết nối socket TCP đến server, và server phải đồng thời giám sát tất cả các sockets để kiểm tra dữ liệu đến, đồng thời chấp nhận các kết nối mới. Phương pháp truyền thống là spawn một thread cho mỗi kết nối sẽ nhanh chóng trở nên không khả thi khi số lượng clients tăng lên do overhead bộ nhớ và chi phí context switching.
 
-**Select() Mechanism**
+Hệ thống này sử dụng I/O multiplexing với `select()` system call để giải quyết thách thức này. Select() là một trong những cơ chế multiplexing lâu đời nhất, được hỗ trợ trên tất cả các hệ thống Unix-like và cung cấp giải pháp portable.
 
-Select() system call allows server monitor multiple file descriptors simultaneously và block cho đến khi ít nhất một fd ready cho I/O operation (reading, writing hoặc có exception). API signature:
+**Cơ chế Select()**
+
+Lệnh gọi hệ thống select() cho phép server giám sát nhiều file descriptors đồng thời và block cho đến khi ít nhất một fd sẵn sàng cho hoạt động I/O (đọc, ghi hoặc có exception). Chữ ký API:
+
 ```c
 int select(int nfds, fd_set *readfds, fd_set *writefds,
            fd_set *exceptfds, struct timeval *timeout);
 ```
 
-Server uses select() như sau:
+Server sử dụng select() như sau:
 
-Trước mỗi iteration của main loop, server creates một fd_set (set of file descriptors) và adds tất cả sockets cần monitor. Specifically, server adds listening socket (để accept new connections) và tất cả client sockets (để receive data).
+Trước mỗi lần lặp của vòng lặp chính, server tạo một fd_set (tập các file descriptors) và thêm tất cả các sockets cần giám sát. Cụ thể, server thêm listening socket (để chấp nhận các kết nối mới) và tất cả các client sockets (để nhận dữ liệu):
 
 ```c
 fd_set read_fds;
-FD_ZERO(&read_fds);  // Clear set
-FD_SET(server_fd, &read_fds);  // Add listening socket
+FD_ZERO(&read_fds);  // Xóa tập hợp
+FD_SET(server_fd, &read_fds);  // Thêm listening socket
 
 int max_fd = server_fd;
 for (int i = 0; i < player_count; i++) {
@@ -440,7 +453,8 @@ for (int i = 0; i < player_count; i++) {
 }
 ```
 
-Sau đó, server calls select() với timeout (ví dụ: 1 second) để avoid blocking indefinitely:
+Sau đó, server gọi select() với timeout (ví dụ: 1 giây) để tránh blocking vô thời hạn:
+
 ```c
 struct timeval timeout;
 timeout.tv_sec = 1;
@@ -449,20 +463,20 @@ timeout.tv_usec = 0;
 int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
 ```
 
-Select() blocks cho đến khi ít nhất một fd ready hoặc timeout expires. When returns, readfds set được modified để indicate which fds are ready. Server then checks each fd:
+Select() blocks cho đến khi ít nhất một fd sẵn sàng hoặc timeout hết. Khi trả về, tập readfds được sửa đổi để chỉ ra fd nào sẵn sàng. Server sau đó kiểm tra từng fd:
 
 ```c
 if (FD_ISSET(server_fd, &read_fds)) {
-    // Listening socket ready - accept new connection
+    // Listening socket sẵn sàng - chấp nhận kết nối mới
     int client_fd = accept(server_fd, ...);
-    // Add to players array
+    // Thêm vào mảng players
 }
 
 for (int i = 0; i < player_count; i++) {
     if (FD_ISSET(players[i].fd, &read_fds)) {
-        // Client socket ready - receive data
+        // Client socket sẵn sàng - nhận dữ liệu
         int bytes = recv(players[i].fd, buffer, size, 0);
-        // Process message
+        // Xử lý message
     }
 }
 ```
@@ -482,30 +496,30 @@ Tuy nhiên, select() có limitations:
 
 Cho current scale (100 clients), select() performs adequately. For larger scales, server should migrate sang epoll (Linux) hoặc kqueue (BSD/macOS) which have O(1) complexity và no hardcoded limits.
 
-### 5.2. Connection lifecycle management
+### 5.2. Quản lý vòng đời kết nối
 
-**Connection Establishment**
+**Thiết lập kết nối**
 
-Khi client calls network_connect() với server IP và port, C library creates TCP socket và initiates three-way handshake. Server listening socket receives connection request, kernel completes handshake automatically, và accept() call returns new socket descriptor connected đến client.
+Khi client gọi network_connect() với IP và cổng của server, thư viện C tạo socket TCP và khởi tạo bắt tay ba chiều (three-way handshake). Socket listening của server nhận yêu cầu kết nối, kernel hoàn thành bắt tay tự động, và lệnh gọi accept() trả về descriptor socket mới được kết nối với client.
 
-Server wraps socket descriptor trong Player struct, initializes fields (fd, username empty, player_id = 0, state = PLAYER_DISCONNECTED initially) và adds vào global players array. Array index serves as internal identifier, while player_id được assigned sau khi registration.
+Server bọc descriptor socket trong struct Player, khởi tạo các trường (fd, username rỗng, player_id = 0, state = PLAYER_DISCONNECTED ban đầu) và thêm vào mảng toàn cục players. Chỉ số mảng phục vụ như định danh nội bộ, trong khi player_id được gán sau khi đăng ký.
 
-**Data Reception và Message Parsing**
+**Nhận dữ liệu và phân tích cú pháp tin nhắn**
 
-Khi select() indicates client socket ready, server calls recv() để read data vào receive buffer:
+Khi select() cho biết socket client sẵn sàng, server gọi recv() để đọc dữ liệu vào bộ đệm nhận:
 ```c
 int bytes_read = recv(players[i].fd, 
                      players[i].recv_buffer + players[i].recv_buffer_len,
                      space_available, 0);
 ```
 
-Data được append vào existing buffer content vì TCP có thể deliver messages partially. Buffer length được tracked để know where to write new data.
+Dữ liệu được nối thêm vào nội dung bộ đệm hiện tại vì TCP có thể chuyển các tin nhắn một cách từng phần. Độ dài bộ đệm được theo dõi để biết nơi ghi dữ liệu mới.
 
-Sau khi receive, server attempts parse complete messages từ buffer. Parser reads 4-byte length prefix, checks if full message available, extracts message và removes từ buffer. Process repeats cho tất cả complete messages, leaving partial message trong buffer for next recv().
+Sau khi nhận, server cố gắng phân tích cú pháp các tin nhắn hoàn chỉnh từ bộ đệm. Trình phân tích cú pháp đọc tiền tố 4 byte độ dài, kiểm tra xem tin nhắn đầy đủ có sẵn không, trích xuất tin nhắn và loại bỏ khỏi bộ đệm. Quá trình lặp lại cho tất cả các tin nhắn hoàn chỉnh, để lại tin nhắn một phần trong bộ đệm cho recv() tiếp theo.
 
-**Message Dispatching**
+**Gửi tin nhắn**
 
-Sau khi parse message type và JSON data, server dispatches đến appropriate handler function dựa trên message type:
+Sau khi phân tích loại tin nhắn và dữ liệu JSON, server gửi đến hàm xử lý thích hợp dựa trên loại tin nhắn:
 ```c
 switch (msg_type) {
     case MSG_REGISTER:
@@ -517,58 +531,58 @@ switch (msg_type) {
     case MSG_CHAT:
         handle_chat(player, json_data);
         break;
-    // ... other message types
+    // ... các loại tin nhắn khác
 }
 ```
 
-Mỗi handler function validates request (check player state, room state, permissions), updates game state nếu valid và generates responses. Responses được sent ngay lập tức hoặc broadcast đến multiple players.
+Mỗi hàm xử lý xác thực yêu cầu (kiểm tra trạng thái player, trạng thái phòng, quyền), cập nhật trạng thái trò chơi nếu hợp lệ và tạo phản hồi. Phản hồi được gửi ngay lập tức hoặc phát sóng đến nhiều người chơi.
 
-**Connection Termination**
+**Kết thúc kết nối**
 
-Connection có thể terminate vì several reasons:
-- Client explicitly calls disconnect: Client sends FIN packet, server recv() returns 0
-- Network failure: Connection timeout, server recv() returns -1 with ETIMEDOUT
-- Server-initiated disconnect: Server calls close(fd) khi kick player hoặc detect stale connection
+Kết nối có thể kết thúc vì nhiều lý do:
+- Client gọi disconnect một cách rõ ràng: Client gửi gói FIN, recv() của server trả về 0
+- Lỗi mạng: Timeout kết nối, recv() của server trả về -1 với ETIMEDOUT
+- Server khởi tạo ngắt kết nối: Server gọi close(fd) khi loại bỏ người chơi hoặc phát hiện kết nối cũ
 
-Khi detect disconnect, server calls handle_disconnect() function:
+Khi phát hiện ngắt kết nối, server gọi hàm handle_disconnect():
 ```c
 void handle_disconnect(Player* player) {
     Room* room = get_player_room(player);
     if (room) {
-        // Notify other players
+        // Thông báo cho người chơi khác
         char info[256];
         snprintf(info, sizeof(info), "{\"player_id\":%u,\"username\":\"%s\"}",
                  player->player_id, player->username);
         broadcast_to_room(room, MSG_PLAYER_LEAVE, info, player);
         
-        // Remove from room
+        // Loại bỏ khỏi phòng
         leave_room(player);
     }
-    // Socket already closed by caller
+    // Socket đã được đóng bởi lệnh gọi trước
 }
 ```
 
-Player được removed từ room, other players notified, và game state adjusted (e.g., end round nếu drawer disconnects). Socket descriptor được closed và Player struct removed từ array.
+Player được loại bỏ khỏi phòng, những người chơi khác được thông báo, và trạng thái trò chơi được điều chỉnh (ví dụ: kết thúc vòng nếu người vẽ ngắt kết nối). Descriptor socket được đóng và struct Player bị xóa khỏi mảng.
 
-### 5.3. Concurrent room management
+### 5.3. Quản lý phòng chơi đồng thời
 
-Server có thể host multiple game rooms simultaneously, mỗi room là independent game session. Rooms được stored trong global array of 100 Room structs.
+Server có thể lưu trữ nhiều phòng chơi đồng thời, mỗi phòng là một phiên chơi độc lập. Các phòng được lưu trữ trong mảng toàn cục gồm 100 struct Room.
 
-**Room State Machine**
+**Máy trạng thái phòng chơi**
 
-Mỗi room has state machine với three states:
-- ROOM_WAITING: Room created, waiting for players và countdown
-- ROOM_PLAYING: Game active, processing rounds
-- ROOM_ENDED: Game finished, players can leave
+Mỗi phòng có máy trạng thái với ba trạng thái:
+- ROOM_WAITING: Phòng được tạo, chờ người chơi và bộ đếm ngược
+- ROOM_PLAYING: Trò chơi hoạt động, xử lý các vòng
+- ROOM_ENDED: Trò chơi kết thúc, người chơi có thể rời đi
 
-State transitions:
-- WAITING → PLAYING: When countdown reaches 0 hoặc host starts early
-- PLAYING → ENDED: When all rounds completed
-- ENDED → WAITING: Room reset for new game (currently not implemented, room becomes inactive)
+Chuyển đổi trạng thái:
+- WAITING → PLAYING: Khi bộ đếm ngược đạt 0 hoặc host khởi động sớm
+- PLAYING → ENDED: Khi hoàn thành tất cả các vòng
+- ENDED → WAITING: Phòng được đặt lại cho trò chơi mới (hiện tại không triển khai, phòng trở thành không hoạt động)
 
-**Room Isolation**
+**Cách ly phòng chơi**
 
-Mỗi room maintain riêng state: player list, current drawer, word, round number, timer, canvas strokes. Operations on một room không affect other rooms. Khi server broadcasts message, nó only sends đến players trong same room:
+Mỗi phòng duy trì trạng thái riêng: danh sách người chơi, người vẽ hiện tại, từ, số vòng, bộ hẹn giờ, strokes canvas. Các hoạt động trên một phòng không ảnh hưởng đến các phòng khác. Khi server phát sóng tin nhắn, nó chỉ gửi đến những người chơi trong cùng một phòng:
 
 ```c
 void broadcast_to_room(Room* room, MessageType type, 
@@ -581,28 +595,28 @@ void broadcast_to_room(Room* room, MessageType type,
 }
 ```
 
-Exclude parameter allows skip sender khi broadcasting (e.g., không send stroke back to drawer).
+Tham số exclude cho phép bỏ qua người gửi khi phát sóng (ví dụ: không gửi stroke lại cho người vẽ).
 
-**Room Lifecycle**
+**Vòng đời phòng chơi**
 
-Room lifecycle:
-1. Created: When first player joins via matchmaking hoặc creates private room
-2. Players Join: Players added đến room, player_count increments
-3. Countdown: When 2+ players present, 15-second countdown starts
-4. Game Start: Countdown expires, total_rounds set to player_count, first round begins
-5. Rounds: Players take turns drawing, others guess, timer runs, round ends
-6. Game End: All rounds complete, final scores broadcast, room enters ENDED state
-7. Cleanup: Players leave, room becomes inactive (player_count = 0)
+Vòng đời phòng chơi:
+1. Được tạo: Khi người chơi đầu tiên tham gia thông qua ghép cặp hoặc tạo phòng riêng tư
+2. Người chơi tham gia: Người chơi được thêm vào phòng, player_count tăng
+3. Bộ đếm ngược: Khi có 2+ người chơi, bộ đếm ngược 15 giây bắt đầu
+4. Bắt đầu trò chơi: Bộ đếm ngược hết, total_rounds được đặt thành player_count, vòng đầu tiên bắt đầu
+5. Các vòng: Người chơi lần lượt vẽ, những người khác đoán, bộ hẹn giờ chạy, vòng kết thúc
+6. Kết thúc trò chơi: Hoàn thành tất cả các vòng, điểm số cuối cùng được phát sóng, phòng chuyển sang trạng thái ENDED
+7. Dọn dẹp: Người chơi rời đi, phòng trở thành không hoạt động (player_count = 0)
 
-Inactive rooms có thể be reused for new games. Server uses first-fit algorithm để find available room khi player joins matchmaking.
+Các phòng không hoạt động có thể được tái sử dụng cho các trò chơi mới. Server sử dụng thuật toán first-fit để tìm phòng có sẵn khi người chơi tham gia ghép cặp.
 
-### 5.4. Thread safety và synchronization
+### 5.4. An toàn luồng và đồng bộ hóa
 
-Server uses minimal locking vì main game loop is single-threaded. Tuy nhiên, timer thread runs concurrently và accesses shared room state, requiring synchronization.
+Server sử dụng khóa tối thiểu vì vòng lặp trò chơi chính là đơn luồng. Tuy nhiên, luồng bộ hẹn giờ chạy đồng thời và truy cập trạng thái phòng chung, yêu cầu đồng bộ hóa.
 
-**Matchmaking Mutex**
+**Mutex Ghép cặp**
 
-Global matchmaking_mutex protects rooms array khi create/find/iterate rooms. Timer thread locks mutex khi iterate rooms để update timers, preventing race conditions với main thread creating/destroying rooms.
+Global matchmaking_mutex bảo vệ mảng rooms khi tạo/tìm/lặp qua phòng. Luồng bộ hẹn giờ khóa mutex khi lặp qua phòng để cập nhật bộ hẹn giờ, ngăn chặn điều kiện đua với luồng chính tạo/hủy phòng.
 
 ```c
 void iterate_active_rooms(void (*callback)(Room*)) {
@@ -617,15 +631,16 @@ void iterate_active_rooms(void (*callback)(Room*)) {
 }
 ```
 
-**Stats Mutex**
+**Mutex Thống kê**
 
-Stats_mutex protects player_stats.txt file khi read/write player statistics. Multiple threads (main thread saving stats, potentially multiple game ending simultaneously) could corrupt file without locking.
+stats_mutex bảo vệ tệp player_stats.txt khi đọc/ghi thống kê người chơi. Nhiều luồng (luồng chính lưu thống kê, có thể nhiều trò chơi kết thúc đồng thời) có thể làm hỏng tệp nếu không khóa.
 
-**Lock-Free Techniques**
+**Kỹ thuật không khóa**
 
-Trong main loop, server processes messages sequentially, eliminating need for locks. Each room's state chỉ accessed bởi thread processing messages từ players trong that room (effectively single-threaded per room).
+Trong vòng lặp chính, server xử lý các tin nhắn tuần tự, loại bỏ nhu cầu khóa. Trạng thái của mỗi phòng chỉ được truy cập bởi luồng xử lý các tin nhắn từ những người chơi trong phòng đó (hiệu quả là đơn luồng trên mỗi phòng).
 
-Timer thread only reads room state để calculate time remaining và writes limited fields (time_remaining). Được designed để tolerate minor inconsistencies (e.g., timer update delayed by one second không critical).
+Luồng bộ hẹn giờ chỉ đọc trạng thái phòng để tính toán thời gian còn lại và ghi các trường hạn chế (time_remaining). Được thiết kế để chịu những sự không nhất quán nhỏ (ví dụ: cập nhật bộ hẹn giờ bị trễ một giây không quan trọng).
+
 
 ### 5.5. Resource limits và scalability
 
@@ -672,13 +687,13 @@ With these optimizations, server có thể handle thousands of concurrent connec
 
 ### 6.1. Tổng kết
 
-Dự án đã successfully implement một hệ thống multiplayer game hoàn chỉnh sử dụng Berkeley Sockets API và TCP protocol. Hệ thống demonstrate các khái niệm fundamental của network programming: socket creation và binding, connection establishment, data transmission với proper framing, I/O multiplexing, và graceful connection termination.
+Dự án đã successfully implement một hệ thống multiplayer game hoàn chỉnh sử dụng Berkeley Sockets API và TCP protocol. Hệ thống thể hiện các khái niệm cơ bản của network programming: socket creation và binding, thiết lập kết nối, truyền dữ liệu với proper framing, I/O multiplexing, và kết thúc kết nối một cách graceful.
 
-Architecture được thiết kế theo layered approach với clear separation of concerns: presentation layer (Pygame client) handles UI và user input, networking layer (C shared library) abstracts socket operations, và business logic layer (C server) implements game rules và state management. Approach này promotes code reusability, testability và maintainability.
+Kiến trúc được thiết kế theo phương pháp layered với sự tách biệt rõ ràng về trách nhiệm: presentation layer (Pygame client) xử lý UI và user input, networking layer (C shared library) trừu tượng hóa các socket operations, và business logic layer (C server) cài đặt các luật chơi và quản lý state. Cách tiếp cận này thúc đẩy code reusability, testability và maintainability.
 
-Protocol design balances simplicity với extensibility. Length-prefix framing với JSON payloads provides human-readable format dễ debug trong khi still being efficient enough cho real-time game. Message types được carefully designed để cover tất cả game scenarios từ registration đến game end.
+Thiết kế protocol cân bằng giữa simplicity và extensibility. Length-prefix framing với JSON payloads cung cấp format dễ đọc dễ debug đồng thời vẫn đủ efficient cho real-time game. Các message types được thiết kế cẩn thận để bao quát tất cả các kịch bản trò chơi từ đăng ký đến kết thúc trò chơi.
 
-Server implementation demonstrates efficient resource utilization với single-threaded event loop using select() multiplexing. Approach này allows server handle dozens of concurrent connections với minimal CPU và memory overhead. Thread safety ensured thông qua careful locking của shared resources.
+Cài đặt server thể hiện hiệu quả sử dụng tài nguyên với single-threaded event loop sử dụng select() multiplexing. Cách tiếp cận này cho phép server xử lý hàng chục kết nối đồng thời với CPU và memory overhead tối thiểu. Thread safety được đảm bảo thông qua locking cẩn thận của các shared resources.
 
 ### 6.2. Bài học kinh nghiệm
 

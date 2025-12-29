@@ -846,6 +846,8 @@ class ScribbleGame:
         
         # Brush size display
         brush_text = self.font_small.render(f"{self.canvas.line_width}px", True, BLACK)
+        brush_text_2 = self.font_small.render(f"Brush:", True, BLACK)
+        self.screen.blit(brush_text_2, (CANVAS_X + 420, y + 10))
         self.screen.blit(brush_text, (CANVAS_X + 555, y + 10))
         
         # Color palette

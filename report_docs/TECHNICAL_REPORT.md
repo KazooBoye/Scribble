@@ -173,29 +173,36 @@ Example:
 **Special Case:**
 - Tất cả players đã đoán đúng → End round sớm
 
-### 3.4. Use Case: Player Disconnect & Reconnect
+### 3.4. Use Case: Connection Monitoring & Player Disconnect
 
-**Actor:** Người chơi bị mất kết nối  
-**Precondition:** Game đang chơi, kết nối bị gián đoạn  
+**Actor:** Người chơi trong game  
+**Precondition:** Game đang chơi, player đã kết nối  
 
-**Main Flow - Disconnect:**
-1. Client proxy phát hiện connection lost
-2. Gửi `MSG_DISCONNECT` hoặc timeout
-3. Server lưu player state với `session_token`
+**Main Flow - Connection Monitoring:**
+1. Client gửi `MSG_PING` mỗi 5 giây
+2. Server nhận PING và trả về `MSG_PONG`
+3. Client track thời gian chờ PONG response
+4. Nếu không nhận PONG trong 15 giây → connection timeout
+5. Client hiển thị red banner "Connection Lost"
+6. TCP layer cố gắng duy trì connection (OS-level buffering)
+7. Nếu kết nối phục hồi → Client nhận PONG → ẩn banner
+8. Nếu kết nối không phục hồi → TCP disconnect
+
+**Main Flow - Permanent Disconnect:**
+1. TCP connection bị đóng (timeout, network failure, hoặc user close)
+2. Server phát hiện socket disconnect (select() hoặc send error)
+3. Server xóa player khỏi room
 4. Server broadcast `MSG_PLAYER_LEAVE` cho players còn lại
-5. Server giữ player state trong 5 phút
+5. Nếu player là drawer → End round và chuyển lượt
 6. Game tiếp tục với players còn lại
 
-**Main Flow - Reconnect:**
-1. Player mở lại browser và connect
-2. Client có `session_token` đã lưu trong localStorage
-3. Gửi `MSG_RECONNECT_REQUEST` với token
-4. Server validate token và restore player state
-5. Server gửi `MSG_RECONNECT_SUCCESS` với full game state
-6. Client restore UI: canvas, scores, timer, turn
-7. Player tiếp tục game từ nơi đã dừng
+**Reconnection Behavior:**
+- **Không có application-level reconnection:** Player phải join room mới
+- **TCP Resilience:** Brief network outages được OS TCP stack xử lý
+- **UI Feedback:** Red "Connection Lost" banner khi PING/PONG timeout
+- **Clean State:** Player disconnect được xử lý gracefully (adjust rounds, skip turn)
 
-**Postcondition:** Player trở lại game với state đúng
+**Postcondition:** Player disconnected hoặc connection restored (nếu brief outage)
 
 ### 3.5. Use Case: Game End & Rankings
 
@@ -224,6 +231,67 @@ Example:
 5. Player click "Return to Home" → quay về landing page
 
 **Postcondition:** Game kết thúc, có thể chơi lại
+
+### 3.6. Use Case: Host Start Game Early (Private Rooms)
+
+**Actor:** Host của private room  
+**Precondition:** Private room đã tạo, có 2+ players, game chưa bắt đầu  
+
+**Main Flow:**
+1. Host tạo hoặc join private room đầu tiên
+2. Server đánh dấu host với `room->host_player_id`
+3. Khi có 2+ players, countdown 15 giây bắt đầu
+4. Host nhìn thấy button "Start Game" (chỉ host thấy)
+5. Host click "Start Game" để bỏ qua countdown
+6. Client gửi `MSG_HOST_START_GAME` (type 27)
+7. Server validate:
+   - `player_id == room->host_player_id`
+   - `room->player_count >= 2`
+   - `room->state == ROOM_WAITING`
+8. Server dừng countdown và gọi `start_game(room)`
+9. Server broadcast `MSG_GAME_START` cho tất cả players
+10. Game bắt đầu ngay lập tức với round 1
+
+**Alternative Flow - Invalid Start:**
+- Nếu <2 players: Button greyed out, không gửi request
+- Nếu không phải host: Button không hiển thị
+- Nếu server reject: Gửi `MSG_ERROR` về client
+
+**Postcondition:** Game bắt đầu ngay lập tức, bỏ qua countdown
+
+### 3.7. Use Case: Host Kick Player (Private Rooms)
+
+**Actor:** Host của private room  
+**Precondition:** Private room có 2+ players, player cần kick đang trong room  
+
+**Main Flow:**
+1. Host hover mouse lên player card trong players list
+2. Hiển thị kick icon (red X) ở góc player card
+3. Host click kick icon
+4. Client confirm dialog: "Kick [username] from room?"
+5. Host confirm → Client gửi `MSG_HOST_KICK_PLAYER` (type 28) với `player_id`
+6. Server validate:
+   - Sender là host (`player_id == room->host_player_id`)
+   - Target player tồn tại trong room
+   - Target player ≠ host (không thể kick chính mình)
+7. Server xóa player khỏi room:
+   - Gọi `remove_player_from_room(room, target_player)`
+   - Adjust drawer_idx nếu cần
+   - Recalculate total_rounds
+8. Server gửi `MSG_DISCONNECT` cho kicked player với reason "Kicked by host"
+9. Server broadcast `MSG_PLAYER_LEAVE` cho players còn lại với reason "kicked"
+10. Kicked player hiển thị dialog "Kicked from Room" với button "Return to Home"
+
+**Alternative Flow - Invalid Kick:**
+- Nếu không phải host: Kick icon không hiển thị
+- Nếu kick chính mình: Server reject với `MSG_ERROR`
+- Nếu target không trong room: Server reject
+
+**Special Cases:**
+- Nếu kick drawer đang vẽ → End round và chuyển lượt
+- Nếu kick làm room còn <2 players → Cancel countdown (nếu đang countdown)
+
+**Postcondition:** Player bị kick rời room, players còn lại tiếp tục game
 
 ---
 
