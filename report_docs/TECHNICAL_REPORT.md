@@ -7,9 +7,9 @@
 
 **Cập nhật gần đây:**
 - ✅ Persistent Player Statistics (CSV storage)
-- ✅ Reconnection System (session tokens, 5min state preservation)
 - ✅ Host Controls (early game start, kick players for private rooms)
 - ✅ Resource Manager (programmatic fallback icon generation)
+- ✅ Simplified Connection Monitoring (PING/PONG with TCP resilience)
 
 ---
 
@@ -37,27 +37,32 @@ Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, đ�
 - Phát triển Pygame client với C networking library
 - Triển khai hệ thống matchmaking thông minh
 - Đảm bảo đồng bộ real-time cho drawing và chat qua TCP
-- Xử lý reconnection và persistence
+- Connection monitoring với PING/PONG
 - Tạo UI trực quan với Pygame rendering
 
-### 1.3. Công nghệ sử dụng
+---
+
+## 2. KIẾN TRÚC HỆ THỐNG
+
+### 2.1. Sơ đồ kiến trúc tổng quan
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │              PYGAME CLIENTS (Python + Pygame)               │
 │         Pygame UI + Canvas + ctypes → C Library             │
 └──────────────────┬──────────────────────────────────────────┘
-                   │ ctypes call
+                   │ ctypes FFI
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │           C NETWORKING LIBRARY (libscribble_client)         │
 │              network.c - Berkeley Sockets                   │
 │              - TCP socket management                        │
-│              - Message framing (length prefix)              │
+│              - Message framing (4-byte length prefix)       │
 │              - Compiled to .dylib (macOS) / .so (Linux)     │
 │              - Called via Python ctypes                     │
 └──────────────────┬──────────────────────────────────────────┘
                    │ TCP (Port 9090)
+                   │ JSON over TCP
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      GAME SERVER (C Program)                │
@@ -66,14 +71,14 @@ Scribble là một trò chơi multiplayer real-time tương tự skribbl.io, đ�
 │  (Port 9090)    │              │              │  Thread     │
 │  - Per-client   │  - Rooms     │  - Auto      │  - 1Hz      │
 │    sockets      │  - Rounds    │    match     │    tick     │
-│  - Select()     │  - Scoring   │  - Private   │  - Round    │
+│  - select()     │  - Scoring   │  - Private   │  - Round    │
 │  - Broadcast    │  - Drawing   │    rooms     │    timer    │
-│  - JSON msg     │    state     │  - Join code │  - Updates  │
+│  - JSON parse   │    state     │  - Join code │  - Updates  │
 ├─────────────────┴──────────────┴──────────────┴─────────────┤
-│  Stats System   │  Reconnection │  Host Controls             │
-│  - CSV storage  │  - Sessions   │  - Early start             │
-│  - Thread-safe  │  - 5min cache │  - Kick players            │
-│  - Leaderboard  │  - Auto retry │  - Permission check        │
+│  Stats System   │  Connection   │  Host Controls             │
+│  - CSV storage  │  Monitoring   │  - Early start             │
+│  - Thread-safe  │  - PING/PONG  │  - Kick players            │
+│  - Leaderboard  │  - 15s timeout│  - Permission check        │
 └─────────────────┴───────────────┴────────────────────────────┘
 ```
 
@@ -238,7 +243,6 @@ server/
 ├── game/                          # Game Logic
 │   ├── game_logic.c/.h           # Core game mechanics
 │   ├── matchmaking.c/.h          # Room management
-│   ├── reconnection.c/.h         # Reconnection handling
 │   └── stats.c/.h                # Player statistics persistence
 │
 └── utils/                         # Utilities
@@ -319,7 +323,6 @@ typedef struct {
     bool is_drawing;
     bool has_guessed;
     bool has_drawn;            // Track if had turn
-    char session_token[64];    // For reconnection
     char recv_buffer[4096];    // Partial message buffer
     int recv_buffer_len;
     
@@ -508,49 +511,7 @@ void update_fastest_guess(Player* player, uint64_t guess_time_ms);
   // - Update if faster
 ```
 
-#### 5.1.6. Reconnection System (`game/reconnection.c`)
-**Vai trò:** Session management và state restoration
-
-**Chức năng:**
-- Generate unique session tokens
-- Cache player state for 5 minutes
-- Validate reconnection requests
-- Restore player to room
-
-**Key Data Structures:**
-```c
-typedef struct {
-    char session_token[64];
-    uint32_t player_id;
-    uint32_t room_id;
-    uint64_t disconnect_time;
-    PlayerState saved_state;
-} SessionData;
-```
-
-**Key Functions:**
-```c
-void generate_session_token(char* token, uint32_t player_id);
-  // - Create unique token with timestamp
-  // - Format: playerid-timestamp-random
-
-void save_player_session(Player* player);
-  // - Store player state
-  // - Save room_id, score, state
-  // - Set disconnect timestamp
-
-int restore_player_session(const char* token, Player* player);
-  // - Validate token
-  // - Check 5-minute timeout
-  // - Restore player state
-  // - Re-add to room
-
-void cleanup_expired_sessions();
-  // - Remove sessions > 5 minutes old
-  // - Called periodically by timer
-```
-
-#### 5.1.7. Timer Thread (`utils/timer.c`)
+#### 5.1.6. Timer Thread (`utils/timer.c`)
 **Vai trò:** 1-second tick timer cho game updates
 
 **Chức năng:**
@@ -678,13 +639,10 @@ typedef enum {
     MSG_PLAYER_JOIN = 22,
     MSG_PLAYER_LEAVE = 23,
     MSG_SCORE_UPDATE = 24,
-    MSG_RECONNECT_REQUEST = 25,
-    MSG_RECONNECT_SUCCESS = 26,
-    MSG_RECONNECT_FAIL = 27,
-    MSG_ERROR = 28,
-    MSG_DISCONNECT = 29,
-    MSG_HOST_START_GAME = 30,
-    MSG_HOST_KICK_PLAYER = 31
+    MSG_ERROR = 25,
+    MSG_DISCONNECT = 26,
+    MSG_HOST_START_GAME = 27,
+    MSG_HOST_KICK_PLAYER = 28
 } MessageType;
 
 // Drawing Messages (also via TCP, historical naming)
@@ -724,13 +682,10 @@ typedef enum {
 | 22  | PLAYER_JOIN          | Server→Client  | New player joined room                        |
 | 23  | PLAYER_LEAVE         | Server→Client  | Player left room                              |
 | 24  | SCORE_UPDATE         | Server→Client  | Player score changed                          |
-| 25  | RECONNECT_REQUEST    | Client→Server  | Reconnect with session token                  |
-| 26  | RECONNECT_SUCCESS    | Server→Client  | Reconnection successful, state restored       |
-| 27  | RECONNECT_FAIL       | Server→Client  | Reconnection failed (invalid token)           |
-| 28  | ERROR                | Server→Client  | General error message                         |
-| 29  | DISCONNECT           | Server→Client  | Server-initiated disconnect (kick)            |
-| 30  | HOST_START_GAME      | Client→Server  | Host requests early game start                |
-| 31  | HOST_KICK_PLAYER     | Client→Server  | Host kicks player from room                   |
+| 25  | ERROR                | Server→Client  | General error message                         |
+| 26  | DISCONNECT           | Server→Client  | Server-initiated disconnect (kick)            |
+| 27  | HOST_START_GAME      | Client→Server  | Host requests early game start                |
+| 28  | HOST_KICK_PLAYER     | Client→Server  | Host kicks player from room                   |
 | 100 | UDP_STROKE           | Client↔Server  | Drawing stroke data (via TCP)                 |
 | 101 | UDP_CLEAR_CANVAS     | Client→Server  | Clear canvas command (via TCP)                |
 | 102 | UDP_UNDO             | Client→Server  | Undo stroke (not implemented)                 |
@@ -770,7 +725,7 @@ Pygame → C Library → TCP → Server
 {"type": 2, "data": {"username": "Alice"}}
 
 Server → TCP → C Library → Pygame
-{"type": 3, "data": {"player_id": 123, "session_token": "..."}}
+{"type": 3, "data": {"player_id": 123, "username": "Alice"}}
 ```
 
 **2. Join Matchmaking:**
@@ -869,7 +824,7 @@ Server → All Players (via TCP)
 *Early Game Start:*
 ```
 Host → Server (via TCP)
-{"type": 30, "data": {}}
+{"type": 27, "data": {}}
 
 Server validates:
 - Player is host (player_id == room->host_player_id)
@@ -883,7 +838,7 @@ Server → All Players (via TCP)
 *Kick Player:*
 ```
 Host → Server (via TCP)
-{"type": 31, "data": {"player_id": 456}}
+{"type": 28, "data": {"player_id": 456}}
 
 Server validates:
 - Sender is host
@@ -1025,21 +980,16 @@ Server → Other Players (via TCP)
   - Stats added to Player struct: `correct_guesses_this_game`, `rounds_drawn_this_game`, `round_start_time`
 - [x] **Atomic updates:** Temp file + rename for crash safety
 
-### 7.12. Reconnection System ✅
-- [x] **Session tokens:** Generated on player register
-- [x] **State preservation:** Player/room state saved on disconnect (5min timeout)
-- [x] **Auto-reconnect:** Client detects disconnection and auto-retries
-- [x] **State restoration:** Full game state restored on successful reconnect
-- [x] **Messages:** MSG_RECONNECT_REQUEST/SUCCESS/FAIL
-- [x] **Server-side:**
-  - Save player state to memory on disconnect
-  - Cleanup expired states (>5 minutes)
-  - Restore player to room on reconnect
-- [x] **Client-side:**
-  - Store session token locally
-  - Detect connection loss
-  - Auto-retry with exponential backoff
-  - UI feedback for reconnection status
+### 7.12. Connection Monitoring & TCP Resilience ✅
+- [x] **PING/PONG System:** Client-initiated keepalive every 5 seconds
+- [x] **Connection health:** Server responds with PONG, client tracks timeout
+- [x] **15-second timeout:** Connection lost detected after no PONG for 15s
+- [x] **Connection lost UI:** Red warning banner displayed when disconnected
+- [x] **TCP resilience:** Brief network outages handled by OS-level TCP buffering
+- [x] **Online indicators:** Players see others go offline/online via disconnect messages
+- [x] **Simplified architecture:** No application-level reconnection attempts
+- [x] **Clean disconnects:** Server notifies room when player leaves
+- [x] **Messages:** MSG_PING, MSG_PONG, MSG_DISCONNECT, MSG_PLAYER_LEAVE
 
 ### 7.13. Host Controls for Private Rooms ✅
 - [x] **Host assignment:** First player to create/join room becomes host
@@ -1056,8 +1006,8 @@ Server → Other Players (via TCP)
   - Kicked player shown "Kicked from Room" screen with return button
   - Server validates host permission
 - [x] **Message types:**
-  - MSG_HOST_START_GAME (30): Host requests early start
-  - MSG_HOST_KICK_PLAYER (31): Host removes player
+  - MSG_HOST_START_GAME (27): Host requests early start
+  - MSG_HOST_KICK_PLAYER (28): Host removes player
 - [x] **Permission system:**
   - Room struct tracks host_player_id
   - Server validates all host actions
@@ -1130,8 +1080,8 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 - Multi-threading với pthreads
 - Thread synchronization (mutex, condition variables)
 - Message serialization/deserialization
-- Session management
-- Reconnection strategies
+- Connection monitoring (PING/PONG keepalive)
+- TCP resilience and reliability
 
 **System Design:**
 - Client-server architecture
@@ -1169,7 +1119,7 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 
 **Hạn chế hiện tại:**
 1. Chưa có latency-based matchmaking
-2. Canvas state không được restore sau reconnect
+2. No automatic reconnection (relies on TCP resilience only)
 3. Stats UI chưa được hiển thị trong game
 4. Memory leaks potential chưa fully test
 5. Performance chưa optimize cho scale lớn
@@ -1195,7 +1145,7 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
    - Secure session tokens
 
 4. **Features:**
-   - Canvas state preservation for reconnection
+   - Application-level reconnection system (if needed for production)
    - In-game stats display
    - Player profiles with stats history
    - Global leaderboards (top scores, fastest guesses)
@@ -1231,7 +1181,6 @@ Dự án Scribble đã hoàn thành các mục tiêu chính:
 **server/protocol.h** - Core data structures và message types  
 **server/game/game_logic.c** - Game mechanics  
 **server/game/stats.c/.h** - Player statistics system  
-**server/game/reconnection.c/.h** - Reconnection system  
 **server/tcp/tcp_handler.c** - Message handlers  
 **server/tcp/tcp_server.c** - TCP server với select()  
 **client_c/network.c** - C networking library  

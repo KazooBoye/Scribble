@@ -705,7 +705,7 @@ class ScribbleGame:
             warning_surface.fill(RED)
             self.screen.blit(warning_surface, (0, 0))
             
-            warning_text = self.font_medium.render("⚠ CONNECTION LOST - Attempting to reconnect...", True, WHITE)
+            warning_text = self.font_medium.render("CONNECTION LOST - Attempting to reconnect...", True, WHITE)
             warning_rect = warning_text.get_rect(center=(WINDOW_WIDTH // 2, 25))
             self.screen.blit(warning_text, warning_rect)
         
