@@ -19,10 +19,7 @@
 #define BUFFER_SIZE 4096
 
 // Ports
-#define HTTP_PORT 8080
 #define TCP_PORT 9090
-#define UDP_PORT 9091
-#define WS_PORT 8081
 
 // Message Types (TCP)
 typedef enum {
@@ -51,11 +48,10 @@ typedef enum {
     MSG_PLAYER_JOIN,
     MSG_PLAYER_LEAVE,
     MSG_SCORE_UPDATE,
-    MSG_RECONNECT_REQUEST,
-    MSG_RECONNECT_SUCCESS,
-    MSG_RECONNECT_FAIL,
     MSG_ERROR,
-    MSG_DISCONNECT
+    MSG_DISCONNECT,
+    MSG_HOST_START_GAME,
+    MSG_HOST_KICK_PLAYER
 } MessageType;
 
 // UDP Message Types
@@ -105,6 +101,10 @@ typedef struct {
     bool is_drawing;
     bool has_guessed;
     bool has_drawn;  // Track if player has had their turn to draw
+    // Game session tracking (for stats)
+    int correct_guesses_this_game;
+    int rounds_drawn_this_game;
+    uint64_t round_start_time;  // For tracking guess speed
     // TCP receive buffer for handling partial messages
     char recv_buffer[BUFFER_SIZE];
     int recv_buffer_len;
@@ -116,6 +116,7 @@ typedef struct {
     char room_code[16];
     Player* players[MAX_PLAYERS];
     int player_count;
+    uint32_t host_player_id;         // ID of the room host (creator)
     RoomState state;
     int current_drawer_idx;
     char current_word[MAX_WORD_LEN];

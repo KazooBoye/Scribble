@@ -91,12 +91,22 @@ char* json_create_room_state(const Room* room) {
 // Simple JSON value extraction (not a full parser)
 int json_get_string(const char* json, const char* key, char* out, int out_size) {
     char search[128];
-    snprintf(search, sizeof(search), "\"%s\":\"", key);
+    snprintf(search, sizeof(search), "\"%s\":", key);
     
     const char* start = strstr(json, search);
     if (!start) return -1;
     
     start += strlen(search);
+    
+    // Skip whitespace after colon
+    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') {
+        start++;
+    }
+    
+    // Expect opening quote
+    if (*start != '"') return -1;
+    start++;
+    
     const char* end = strchr(start, '"');
     if (!end) return -1;
     
@@ -117,6 +127,12 @@ int json_get_int(const char* json, const char* key, int* out) {
     if (!start) return -1;
     
     start += strlen(search);
+    
+    // Skip whitespace after colon
+    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') {
+        start++;
+    }
+    
     *out = atoi(start);
     
     return 0;
@@ -133,8 +149,13 @@ int json_get_type(const char* json, MessageType* type) {
 
 // Extract string from nested data field
 int json_get_data_string(const char* json, const char* key, char* out, int out_size) {
-    // Find "data":{ ... }
+    // Find "data": (with or without space after colon)
     const char* data_start = strstr(json, "\"data\":");
+    if (!data_start) {
+        // Try with space after colon
+        data_start = strstr(json, "\"data\" :");
+    }
+    
     if (!data_start) {
         // No data field, try direct extraction
         return json_get_string(json, key, out, out_size);
@@ -146,8 +167,13 @@ int json_get_data_string(const char* json, const char* key, char* out, int out_s
 
 // Extract int from nested data field
 int json_get_data_int(const char* json, const char* key, int* out) {
-    // Find "data":{ ... }
+    // Find "data": (with or without space after colon)
     const char* data_start = strstr(json, "\"data\":");
+    if (!data_start) {
+        // Try with space after colon
+        data_start = strstr(json, "\"data\" :");
+    }
+    
     if (!data_start) {
         // No data field, try direct extraction
         return json_get_int(json, key, out);

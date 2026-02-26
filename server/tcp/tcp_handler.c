@@ -5,7 +5,7 @@
 #include "../utils/timer.h"
 #include "../game/matchmaking.h"
 #include "../game/game_logic.h"
-#include "../game/reconnection.h"
+#include "../game/stats.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,15 +58,19 @@ void handle_register(Player* player, const char* json) {
     player->state = PLAYER_LOBBY;
     player->score = 0;
     player->last_seen = get_current_time_ms();
+    player->correct_guesses_this_game = 0;
+    player->rounds_drawn_this_game = 0;
     
-    generate_session_token(player->session_token, player->player_id);
+    // Load player stats (for future features like displaying stats in UI)
+    PlayerStats stats;
+    load_player_stats(username, &stats);
     
     printf("[TCP] Registered player %u: %s (fd=%d)\n", player->player_id, username, player->fd);
     
     char response[512];
     snprintf(response, sizeof(response), 
-             "{\"player_id\":%u,\"username\":\"%s\",\"session_token\":\"%s\"}",
-             player->player_id, player->username, player->session_token);
+             "{\"player_id\":%u,\"username\":\"%s\"}",
+             player->player_id, player->username);
     
     send_tcp_message(player->fd, MSG_REGISTER_ACK, response);
     log_player_event(player->player_id, "registered", username);
@@ -81,10 +85,35 @@ void handle_ping(Player* player) {
     send_tcp_message(player->fd, MSG_PONG, response);
 }
 
-void handle_join_room(Player* player) {
-    printf("[TCP] Player %u (%s) joining room\n", player->player_id, player->username);
+void handle_join_room(Player* player, const char* json) {
+    printf("[TCP] Player %u (%s) joining room, json=%s\n", player->player_id, player->username, json);
     
-    if (join_matchmaking(player) == 0) {
+    // Check if a room_code is provided (private room)
+    char room_code[16];
+    int result;
+    
+    if (json_get_data_string(json, "room_code", room_code, sizeof(room_code)) == 0) {
+        // Joining private room by code
+        printf("[TCP] Player %u attempting to join private room with code: %s\n", 
+               player->player_id, room_code);
+        result = join_private_room(player, room_code);
+        
+        if (result == -1) {
+            printf("[TCP] Room not found: %s\n", room_code);
+            send_tcp_message(player->fd, MSG_ROOM_NOT_FOUND, "{\"error\":\"Room not found\"}");
+            return;
+        } else if (result == -2) {
+            printf("[TCP] Room is full: %s\n", room_code);
+            send_tcp_message(player->fd, MSG_ROOM_FULL, "{\"error\":\"Room is full\"}");
+            return;
+        }
+    } else {
+        // Auto matchmaking (public room)
+        printf("[TCP] Player %u using auto matchmaking\n", player->player_id);
+        result = join_matchmaking(player);
+    }
+    
+    if (result == 0) {
         Room* room = get_player_room(player);
         printf("[TCP] Player %u joined room %u (now %d players)\n", 
                player->player_id, room ? room->room_id : 0, room ? room->player_count : 0);
@@ -171,52 +200,17 @@ void handle_chat(Player* player, const char* json) {
     broadcast_to_room(room, MSG_CHAT_BROADCAST, broadcast, NULL);
 }
 
-void handle_reconnect(Player* player, const char* json) {
-    char session_token[64];
-    if (json_get_data_string(json, "session_token", session_token, sizeof(session_token)) < 0) {
-        send_tcp_message(player->fd, MSG_RECONNECT_FAIL, "{\"error\":\"Invalid token\"}");
-        return;
-    }
-    
-    Room* room = NULL;
-    if (restore_player_state(player, session_token, &room) == 0) {
-        // Success
-        char* room_state = json_create_room_state(room);
-        send_tcp_message(player->fd, MSG_RECONNECT_SUCCESS, room_state);
-        free(room_state);
-        
-        // Notify other players
-        char player_info[256];
-        snprintf(player_info, sizeof(player_info),
-                 "{\"player_id\":%u,\"username\":\"%s\"}",
-                 player->player_id, player->username);
-        broadcast_to_room(room, MSG_PLAYER_JOIN, player_info, player);
-        
-        // Resend all strokes to catch up
-        for (int i = 0; i < room->stroke_count; i++) {
-            // Note: Strokes are sent via UDP, but we can trigger resend here
-        }
-    } else {
-        send_tcp_message(player->fd, MSG_RECONNECT_FAIL, 
-                        "{\"error\":\"Reconnection failed\"}");
-    }
-}
-
 void handle_disconnect(Player* player) {
     Room* room = get_player_room(player);
-    if (room && room->state == ROOM_PLAYING) {
-        // Save state for reconnection
-        save_player_state(player, room);
-        
-        // Notify others
+    if (room) {
+        // Notify others that player left
         char player_info[256];
         snprintf(player_info, sizeof(player_info),
                  "{\"player_id\":%u,\"username\":\"%s\"}",
                  player->player_id, player->username);
         broadcast_to_room(room, MSG_PLAYER_LEAVE, player_info, player);
-    }
-    
-    if (room) {
+        
+        // Remove player from room
         leave_room(player);
     }
 }
@@ -257,11 +251,22 @@ void handle_stroke(Player* player, const char* json) {
     printf("[TCP] STROKE: Raw JSON: %s\n", json);
     
     // Extract just the stroke data from {"type":100,"data":{stroke_data}}
+    // Handle both "data": and "data" : (with/without space)
     const char* data_start = strstr(json, "\"data\":");
+    if (!data_start) {
+        data_start = strstr(json, "\"data\" :");
+    }
+    
     if (data_start) {
-        data_start += 7; // Skip "data":
-        // Skip whitespace
-        while (*data_start == ' ') data_start++;
+        // Skip past "data": or "data" :
+        data_start = strchr(data_start, ':');
+        if (data_start) {
+            data_start++; // Skip the colon
+            // Skip whitespace
+            while (*data_start == ' ' || *data_start == '\t' || *data_start == '\n') {
+                data_start++;
+            }
+        }
         
         // The data_start now points to the stroke object {...}
         // We need to extract it and add player_id
@@ -316,6 +321,120 @@ void handle_stroke(Player* player, const char* json) {
     }
 }
 
+void handle_host_start_game(Player* player, const char* json) {
+    (void)json;  // Unused parameter
+    
+    if (player->state != PLAYER_IN_ROOM) {
+        printf("[TCP] Player %u not in room, ignoring host start game\n", player->player_id);
+        return;
+    }
+    
+    Room* room = get_player_room(player);
+    if (!room) {
+        printf("[TCP] Room not found for player %u host start game\n", player->player_id);
+        return;
+    }
+    
+    // Verify player is the host
+    if (player->player_id != room->host_player_id) {
+        printf("[TCP] Player %u is not the host of room %u, ignoring start game\n",
+               player->player_id, room->room_id);
+        return;
+    }
+    
+    // Verify minimum player count
+    if (room->player_count < 2) {
+        printf("[TCP] Room %u has only %d player(s), need at least 2 to start\n",
+               room->room_id, room->player_count);
+        return;
+    }
+    
+    // Verify room is in waiting state
+    if (room->state != ROOM_WAITING) {
+        printf("[TCP] Room %u is not in waiting state, ignoring start game\n", room->room_id);
+        return;
+    }
+    
+    printf("[TCP] Host %u (%s) starting game early in room %u with %d players\n",
+           player->player_id, player->username, room->room_id, room->player_count);
+    
+    // Cancel countdown and start immediately
+    room->countdown_active = false;
+    room->game_start_countdown = 0;
+    start_game(room);
+    
+    log_room_event(room->room_id, "host_start_game", player->username);
+}
+
+void handle_host_kick_player(Player* player, const char* json) {
+    if (player->state != PLAYER_IN_ROOM) {
+        printf("[TCP] Player %u not in room, ignoring host kick\n", player->player_id);
+        return;
+    }
+    
+    Room* room = get_player_room(player);
+    if (!room) {
+        printf("[TCP] Room not found for player %u host kick\n", player->player_id);
+        return;
+    }
+    
+    // Verify player is the host
+    if (player->player_id != room->host_player_id) {
+        printf("[TCP] Player %u is not the host of room %u, ignoring kick\n",
+               player->player_id, room->room_id);
+        return;
+    }
+    
+    // Get the player_id to kick
+    int target_player_id = 0;
+    if (json_get_data_int(json, "player_id", &target_player_id) < 0 || target_player_id <= 0) {
+        printf("[TCP] Invalid player_id in kick request from host %u\n", player->player_id);
+        return;
+    }
+    
+    // Find the target player
+    Player* target = NULL;
+    for (int i = 0; i < room->player_count; i++) {
+        if (room->players[i] && room->players[i]->player_id == (uint32_t)target_player_id) {
+            target = room->players[i];
+            break;
+        }
+    }
+    
+    if (!target) {
+        printf("[TCP] Player %u not found in room %u for kick\n", target_player_id, room->room_id);
+        return;
+    }
+    
+    // Cannot kick yourself
+    if (target == player) {
+        printf("[TCP] Host %u attempted to kick themselves, ignoring\n", player->player_id);
+        return;
+    }
+    
+    printf("[TCP] Host %u (%s) kicking player %u (%s) from room %u\n",
+           player->player_id, player->username, 
+           target->player_id, target->username, room->room_id);
+    
+    // Notify the kicked player
+    char kick_msg[256];
+    snprintf(kick_msg, sizeof(kick_msg), 
+             "{\"reason\":\"Kicked by host\"}");
+    send_tcp_message(target->fd, MSG_DISCONNECT, kick_msg);
+    
+    // Remove player from room and broadcast
+    char leave_msg[256];
+    snprintf(leave_msg, sizeof(leave_msg),
+             "{\"player_id\":%u,\"username\":\"%s\",\"reason\":\"kicked\"}",
+             target->player_id, target->username);
+    broadcast_to_room(room, MSG_PLAYER_LEAVE, leave_msg, NULL);
+    
+    remove_player_from_room(room, target);
+    target->state = PLAYER_DISCONNECTED;
+    
+    log_room_event(room->room_id, "player_kicked", target->username);
+}
+
 void handle_tcp_message(Player* player, const char* buffer, int len) {
     MessageType type;
     char* json = NULL;
@@ -336,7 +455,7 @@ void handle_tcp_message(Player* player, const char* buffer, int len) {
             handle_ping(player);
             break;
         case MSG_JOIN_ROOM:
-            handle_join_room(player);
+            handle_join_room(player, json);
             break;
         case MSG_CREATE_ROOM:
             handle_create_room(player);
@@ -344,11 +463,11 @@ void handle_tcp_message(Player* player, const char* buffer, int len) {
         case MSG_CHAT:
             handle_chat(player, json);
             break;
-        case MSG_RECONNECT_REQUEST:
-            handle_reconnect(player, json);
+        case MSG_HOST_START_GAME:
+            handle_host_start_game(player, json);
             break;
-        case MSG_DISCONNECT:
-            handle_disconnect(player);
+        case MSG_HOST_KICK_PLAYER:
+            handle_host_kick_player(player, json);
             break;
         case UDP_STROKE:
             handle_stroke(player, json);

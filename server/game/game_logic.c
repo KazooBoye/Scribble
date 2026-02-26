@@ -3,6 +3,7 @@
 #include "../utils/timer.h"
 #include "../utils/json.h"
 #include "../tcp/tcp_handler.h"
+#include "stats.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,7 @@ void init_room(Room* room, uint32_t room_id, bool is_private) {
     memset(room, 0, sizeof(Room));
     room->room_id = room_id;
     room->is_private = is_private;
+    room->host_player_id = 0;  // Will be set when first player joins
     room->created_at = get_current_time_ms();
     room->state = ROOM_WAITING;
     room->current_drawer_idx = -1;
@@ -82,6 +84,13 @@ int add_player_to_room(Room* room, Player* player) {
     room->players[room->player_count] = player;
     room->player_count++;
     player->state = PLAYER_IN_ROOM;
+    
+    // First player becomes host
+    if (room->player_count == 1) {
+        room->host_player_id = player->player_id;
+        printf("[GAME] Player %u (%s) is now the host of room %u\n",
+               player->player_id, player->username, room->room_id);
+    }
     
     log_room_event(room->room_id, "player_joined", player->username);
     
@@ -160,12 +169,14 @@ void start_game(Room* room) {
     room->round_number = 0;
     room->total_rounds = room->player_count;  // Set total rounds based on current player count
     
-    // Reset all player scores
+    // Reset all player scores and stats tracking
     for (int i = 0; i < room->player_count; i++) {
         if (room->players[i]) {
             room->players[i]->score = 0;
             room->players[i]->state = PLAYER_PLAYING;
             room->players[i]->has_drawn = false;  // Track if player has had their turn
+            room->players[i]->correct_guesses_this_game = 0;
+            room->players[i]->rounds_drawn_this_game = 0;
         }
     }
     
@@ -209,6 +220,7 @@ void start_next_round(Room* room) {
     
     // Mark this player as having drawn
     room->players[room->current_drawer_idx]->has_drawn = true;
+    room->players[room->current_drawer_idx]->rounds_drawn_this_game++;
     
     printf("[GAME] Round %d/%d - Player %d (%s) is drawing\n", 
            room->round_number, room->total_rounds, room->current_drawer_idx,
@@ -223,13 +235,14 @@ void start_next_round(Room* room) {
     room->round_start_time = get_current_time_ms();
     room->stroke_count = 0;
     
-    // Reset player states
+    // Reset player states and set round start time for guess tracking
     for (int i = 0; i < room->player_count; i++) {
         if (room->players[i]) {
             room->players[i]->is_drawing = (i == room->current_drawer_idx);
             room->players[i]->has_guessed = false;
             room->players[i]->state = room->players[i]->is_drawing ? 
                                       PLAYER_DRAWING : PLAYER_GUESSING;
+            room->players[i]->round_start_time = room->round_start_time;
             printf("[GAME] Player %u (%s) - is_drawing: %d, state: %d\n",
                    room->players[i]->player_id, room->players[i]->username,
                    room->players[i]->is_drawing, room->players[i]->state);
@@ -284,6 +297,15 @@ void end_game(Room* room) {
         }
     }
     
+    // Update stats for all players
+    for (int i = 0; i < room->player_count; i++) {
+        if (room->players[i]) {
+            Player* p = room->players[i];
+            bool won = (p == winner);
+            update_game_stats(p, won, p->correct_guesses_this_game, p->rounds_drawn_this_game);
+        }
+    }
+    
     if (winner) {
         log_room_event(room->room_id, "game_ended", winner->username);
     }
@@ -324,6 +346,11 @@ int process_guess(Room* room, Player* player, const char* guess) {
     if (strcmp(guess_lower, word_lower) == 0) {
         // Correct guess!
         player->has_guessed = true;
+        player->correct_guesses_this_game++;
+        
+        // Calculate guess time for stats
+        uint64_t guess_time = get_current_time_ms() - player->round_start_time;
+        update_fastest_guess(player, guess_time);
         
         // Score based on time remaining (more time = more points)
         int points = 10 + (room->time_remaining * 90 / ROUND_TIME);

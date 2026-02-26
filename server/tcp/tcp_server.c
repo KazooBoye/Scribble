@@ -221,3 +221,12 @@ void tcp_send_timer_updates(Room* room) {
              "{\"time_remaining\":%d}", room->time_remaining);
     broadcast_to_room(room, MSG_TIMER_UPDATE, timer_msg, NULL);
 }
+
+Player* find_player_by_ip(const char* ip) {
+    for (int i = 0; i < player_count; i++) {
+        if (players[i].fd > 0 && strcmp(players[i].ip, ip) == 0) {
+            return &players[i];
+        }
+    }
+    return NULL;
+}

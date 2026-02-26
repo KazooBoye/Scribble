@@ -8,5 +8,6 @@
 int tcp_server_start(int port);
 void tcp_server_stop();
 void tcp_send_timer_updates(Room* room);
+Player* find_player_by_ip(const char* ip);
 
 #endif // TCP_SERVER_H
