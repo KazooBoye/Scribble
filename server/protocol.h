@@ -20,7 +20,6 @@
 
 // Ports
 #define TCP_PORT 9090
-#define UDP_PORT 9091
 
 // Message Types (TCP)
 typedef enum {

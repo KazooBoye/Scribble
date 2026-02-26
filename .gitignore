@@ -37,3 +37,9 @@ core.*
 # Debug files
 *.dSYM/
 /client_pygame/__pycache__
+
+# Reports
+/report_docs
+
+# Logs
+/logs

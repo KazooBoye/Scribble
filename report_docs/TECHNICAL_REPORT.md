@@ -403,23 +403,41 @@ typedef struct {
 
 **Key Functions:**
 ```c
-void* tcp_server_thread(void* arg);           // Main TCP thread
-void handle_tcp_message(Player* player, ...); // Message router
-void send_tcp_message(int fd, ...);           // Send with length prefix
-void broadcast_to_room(Room* room, ...);      // Broadcast to all players
+int tcp_server_start(int port);                          // Khởi tạo và start TCP server
+void tcp_server_stop();                                  // Stop server và cleanup
+void tcp_send_timer_updates(Room* room);                 // Broadcast timer updates
+Player* find_player_by_ip(const char* ip);               // Tìm player theo IP
+
+// Internal functions (static trong tcp_server.c):
+void* tcp_server_thread(void* arg);                      // Main event loop với select()
 ```
 
 #### 5.1.2. TCP Handler (`tcp/tcp_handler.c`)
 **Vai trò:** Process và route tất cả TCP messages
 
 **Chức năng chính:**
-- Handle 30+ message types
+- Handle 29 message types (MSG_PING đến MSG_HOST_KICK_PLAYER)
 - Drawing messages (types 100-102): STROKE, CLEAR_CANVAS, UNDO
 - Game flow messages: REGISTER, JOIN_ROOM, GAME_START, etc.
 - Chat messages: CHAT, CHAT_BROADCAST
 - State updates: TIMER_UPDATE, SCORE_UPDATE, etc.
-- Broadcast messages to room members
-- Filter messages (e.g., không gửi stroke về người vẽ)
+- Broadcast messages to room members với optional exclude player
+- Handle disconnect cleanup
+
+**Key Functions:**
+```c
+void send_tcp_message(int fd, MessageType type,          // Gửi message đến 1 client
+                     const char* json_data);
+                     
+void broadcast_to_room(Room* room, MessageType type,     // Broadcast đến tất cả players
+                      const char* json_data,              // trong room, có thể exclude
+                      Player* exclude);                   // một player (e.g. sender)
+                      
+void handle_tcp_message(Player* player,                  // Parse và route message
+                       const char* buffer, int len);      // đến handler phù hợp
+                       
+void handle_disconnect(Player* player);                  // Cleanup khi player disconnect
+```
 
 **Note:** Drawing messages vẫn dùng tên `UDP_STROKE`, `UDP_CLEAR_CANVAS` cho historical reasons nhưng thực tế transmitted qua TCP.
 #### 5.1.3. Game Logic (`game/game_logic.c`)
@@ -450,52 +468,66 @@ typedef struct {
 
 **Key Functions:**
 ```c
-void start_game(Room* room);
-  // - Set total_rounds = player_count
-  // - Reset scores, has_drawn flags
-  // - Start first round
+// Word list management
+int load_word_list(const char* filename);      // Load words từ file
+const char* get_random_word();                 // Get random word cho round
+void cleanup_word_list();                      // Free memory
 
-void start_next_round(Room* room);
-  // - Increment round_number
-  // - Find next player who hasn't drawn
-  // - Skip disconnected players
-  // - Select random word
-  // - Reset round timer
-  // - Broadcast MSG_ROUND_START
+// Room initialization
+void init_room(Room* room, uint32_t room_id,   // Initialize room struct
+              bool is_private);
 
-void end_round(Room* room);
-  // - Broadcast MSG_ROUND_END
-  // - Call start_next_round()
-  // - Or call end_game() if all done
+// Player management
+int add_player_to_room(Room* room,             // Thêm player vào room
+                      Player* player);         // Return 0 success, -1 full
+int remove_player_from_room(Room* room,        // Xóa player khỏi room
+                           Player* player);    // Adjust drawer_idx, rounds
 
-void end_game(Room* room);
-  // - Find winner
-  // - Broadcast MSG_GAME_END with rankings
-  // - Set state to ROOM_ENDED
+// Game flow control
+void start_game(Room* room);                   // Bắt đầu game, set total_rounds
+                                               // = player_count, start round 1
+                                               
+void start_next_round(Room* room);             // Chuyển sang round tiếp theo
+                                               // - Increment round_number
+                                               // - Find next drawer (skip drawn)
+                                               // - Select random word
+                                               // - Reset timer, has_guessed flags
+                                               // - Broadcast MSG_ROUND_START
+                                               
+void end_round(Room* room);                    // Kết thúc round hiện tại
+                                               // - Broadcast MSG_ROUND_END
+                                               // - Call start_next_round() or
+                                               //   end_game() if done
+                                               
+void end_game(Room* room);                     // Kết thúc game
+                                               // - Find winner
+                                               // - Update stats (games_played/won)
+                                               // - Broadcast MSG_GAME_END
+                                               // - Set state = ROOM_ENDED
 
-int process_guess(Room* room, Player* player, const char* guess);
-  // - Case-insensitive comparison
-  // - Calculate score based on time
-  // - Mark player.has_guessed = true
-  // - Broadcast MSG_GUESS_CORRECT
-  // - Check if all guessed → end round early
+// Guessing logic
+int process_guess(Room* room, Player* player,  // Xử lý guess attempt
+                 const char* guess);           // Return 1 correct, 0 wrong
+                                               // - Case-insensitive compare
+                                               // - Calculate score by time
+                                               // - Mark has_guessed = true
+                                               // - Broadcast GUESS_CORRECT
+                                               // - Check all guessed → end early
 
-void update_timer(Room* room);
-  // - Calculate elapsed time
-  // - Update time_remaining
-  // - Broadcast MSG_TIMER_UPDATE
-  // - If time_remaining <= 0 → end_round()
+// Timer management
+void update_timer(Room* room);                 // Update round timer
+                                               // - Calculate elapsed time
+                                               // - Update time_remaining
+                                               // - Broadcast MSG_TIMER_UPDATE
+                                               // - If time <= 0 → end_round()
+                                               
+void check_game_start_countdown(Room* room);   // Check countdown timer
+                                               // - If countdown_active
+                                               // - Broadcast MSG_COUNTDOWN_UPDATE
+                                               // - After 15s → start_game()
 
-void check_game_start_countdown(Room* room);
-  // - Check if countdown active
-  // - Broadcast MSG_COUNTDOWN_UPDATE every second
-  // - After 15 seconds → start_game()
-
-int add_player_to_room(Room* room, Player* player);
-int remove_player_from_room(Room* room, Player* player);
-  // - Adjust drawer_idx if current drawer leaves
-  // - Recalculate total_rounds
-  // - End round if drawer disconnects
+// Drawing management
+void add_stroke(Room* room, const Stroke* stroke); // Thêm stroke vào room canvas
 ```
 
 #### 5.1.4. Matchmaking (`game/matchmaking.c`)
@@ -512,24 +544,42 @@ int remove_player_from_room(Room* room, Player* player);
 
 **Key Functions:**
 ```c
-int join_matchmaking(Player* player);
-  // - Find best available room
-  // - Add player to room
-  // - If player_count == 2 → activate countdown
+void init_matchmaking();                       // Initialize matchmaking system
+                                               // - Allocate rooms array
+                                               // - Initialize mutex
 
-int create_private_room(Player* player);
-  // - Generate unique 6-char code
-  // - Initialize room
-  // - Add creator
+Room* find_room_by_id(uint32_t room_id);       // Tìm room theo ID
+Room* find_room_by_code(const char* code);     // Tìm room theo 6-char code
 
-int join_private_room(Player* player, const char* code);
-  // - Find room by code
-  // - Check if joinable (round <= 1)
-  // - Add player
+Room* create_private_room();                   // Tạo private room
+                                               // - Generate unique 6-char code
+                                               // - Initialize room struct
+                                               // - Return room pointer
 
-void iterate_active_rooms(void (*callback)(Room*));
-  // - Loop through ROOM_WAITING and ROOM_PLAYING
-  // - Call callback for each active room
+int join_private_room(Player* player,          // Join room bằng code
+                     const char* room_code);   // - Find room by code
+                                               // - Validate joinable (round <= 1)
+                                               // - Add player to room
+                                               // - Set host_player_id if first
+                                               // - Return room_id or -1
+
+int join_matchmaking(Player* player);          // Auto matchmaking
+                                               // - Find room với < MAX_PLAYERS
+                                               // - Create new nếu cần
+                                               // - Add player
+                                               // - Activate countdown if >= 2
+                                               // - Return room_id
+
+void leave_room(Player* player);               // Xóa player khỏi room
+                                               // - Find player's room
+                                               // - Call remove_player_from_room()
+
+Room* get_player_room(Player* player);         // Lấy room của player
+
+void iterate_active_rooms(                     // Iterate qua active rooms
+    void (*callback)(Room*));                  // - ROOM_WAITING, ROOM_PLAYING
+                                               // - Call callback cho mỗi room
+                                               // - Used by timer thread
 ```
 
 #### 5.1.5. Stats System (`game/stats.c`)
@@ -558,51 +608,57 @@ typedef struct {
 
 **Key Functions:**
 ```c
-int load_player_stats(const char* username, PlayerStats* stats);
-  // - Read from CSV file
-  // - Parse player stats
-  // - Return 0 if found, -1 if new player
+void init_stats_system();                      // Initialize stats system
+                                               // - Create file if not exists
+                                               // - Initialize mutex
 
-int save_player_stats(const PlayerStats* stats);
-  // - Atomic write with temp file
-  // - Thread-safe with mutex
-  // - Update or append stats
+int load_player_stats(const char* username,    // Load stats từ CSV
+                     PlayerStats* stats);      // Return 0 found, -1 new player
+                                               // - Thread-safe read
+                                               // - Parse CSV line
 
-void update_game_stats(Player* player, bool won);
-  // - Increment games_played
-  // - Increment games_won if won
-  // - Add to total_score
-  // - Update last_played timestamp
+void save_player_stats(const PlayerStats* stats); // Save stats to CSV
+                                               // - Thread-safe với mutex
+                                               // - Atomic write (temp file)
+                                               // - Update existing or append
 
-void update_fastest_guess(Player* player, uint64_t guess_time_ms);
-  // - Compare with current fastest
-  // - Update if faster
+void update_game_stats(Player* player,         // Update sau game end
+                      bool won,                // - Increment games_played
+                      int correct_guesses,     // - Increment games_won if won
+                      int rounds_drawn);       // - Add to total_score
+                                               // - Update counters
+                                               // - Update last_played timestamp
+                                               // - Call save_player_stats()
+
+void update_fastest_guess(Player* player,      // Update fastest guess time
+                         uint64_t guess_time_ms); // - Compare with current best
+                                               // - Update if faster
+                                               // - Thread-safe
+
+int get_leaderboard(PlayerStats* leaderboard,  // Get top N players
+                   int max_count);             // Sorted by total_score DESC
+                                               // Return actual count
 ```
 
-#### 5.1.6. Timer Thread (`utils/timer.c`)
-**Vai trò:** 1-second tick timer cho game updates
+#### 5.1.6. Timer Utilities (`utils/timer.c`)
+**Vai trò:** Utility functions cho time management
 
 **Chức năng:**
-- Run trong separate thread
-- Mỗi giây gọi callback:
-  - `check_game_start_countdown()` cho countdown
-  - `update_timer()` cho round timer
-  - Broadcast `MSG_TIMER_UPDATE` và `MSG_COUNTDOWN_UPDATE`
-- Thread-safe với mutex
+- Cung cấp cross-platform time utilities
+- Millisecond-precision timestamps
+- Sleep functions
 
-**Implementation:**
+**Key Functions:**
 ```c
-void* timer_thread(void* arg) {
-    while (timer_running) {
-        sleep(1);
-        
-        iterate_active_rooms([](Room* room) {
-            check_game_start_countdown(room);
-            update_timer(room);
-        });
-    }
-}
+uint64_t get_current_time_ms();                // Get current timestamp (ms)
+                                               // Used for round timers,
+                                               // guess timing, stats
+
+void sleep_ms(int milliseconds);               // Cross-platform sleep
+                                               // Used in timer thread
 ```
+
+**Note:** Main timer loop nằm trong `main.c` với pthread, gọi `iterate_active_rooms()` mỗi giây để update countdown và round timers.
 
 ### 5.2. C Networking Library (`client_c/`)
 
@@ -617,10 +673,30 @@ void* timer_thread(void* arg) {
 
 **Key Functions:**
 ```c
-int network_connect(const char* host, int port);
-int network_send_tcp(const char* msg, int len);
-int network_recv_tcp(char* buffer, int buffer_size);
-void network_disconnect();
+int network_connect(const char* host, int tcp_port); // Connect to server
+                                               // - Create TCP socket
+                                               // - Connect to host:port
+                                               // - Start receive thread
+                                               // Return 0 success, -1 error
+
+int network_send_tcp(const char* message_json); // Send JSON message
+                                               // - Add 4-byte length prefix
+                                               // - Convert to network byte order
+                                               // - Send via TCP socket
+                                               // Return 0 success, -1 error
+
+void network_set_callback(                     // Register message callback
+    message_callback_t callback);              // - Callback gọi từ recv thread
+                                               // - Must be thread-safe
+                                               // - Process message quickly
+
+int network_is_connected(void);                // Check connection status
+                                               // Return 1 connected, 0 not
+
+void network_disconnect(void);                 // Disconnect và cleanup
+                                               // - Stop receive thread
+                                               // - Close socket
+                                               // - Free resources
 ```
 
 ### 5.3. Pygame Client (`client_pygame/`)
